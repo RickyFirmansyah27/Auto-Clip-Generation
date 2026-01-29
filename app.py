@@ -572,17 +572,12 @@ class AIAutoShortsApp(ctk.CTk):
             video.audio.write_audiofile(audio_path, verbose=False, logger=None)
             video.close()
 
-            # Calculate clip count based on auto mode or manual
+            # Use auto clip count or manual setting
             if config['auto_clip']:
-                # Auto mode: 1 clip per 5 minutes
-                config['clip_count'] = max(1, int(video_duration / 300))
-                self.log("INFO", f"Auto mode: {config['clip_count']} klip untuk video {int(video_duration/60)} menit")
-            else:
-                # Manual mode: limit if too many
-                recommended_clips = max(1, int(video_duration / 300))
-                if config['clip_count'] > recommended_clips * 2:
-                    self.log("WARNING", f"Video duration: {int(video_duration/60)} min. Adjusting clips to {recommended_clips}")
-                    config['clip_count'] = recommended_clips
+                # Auto mode: let user decide via slider, use that value
+                self.log("INFO", f"Auto mode: menggunakan {config['clip_count']} klip")
+
+            # No limit on clip count - user decides
 
             self.log("SUCCESS", f"Audio extracted! Duration: {int(video_duration/60)} minutes")
 
@@ -713,18 +708,25 @@ class AIAutoShortsApp(ctk.CTk):
 
         prompt = f"""
         You are a professional Video Editor. Analyze this transcript.
-        Find exactly {num_clips} viral segments for TikTok (30-60 seconds each).
+        Find exactly {num_clips} viral segments for TikTok/YouTube Shorts.
+
+        STRICT DURATION RULES:
+        - MINIMUM duration: 30 seconds
+        - MAXIMUM duration: 60 seconds
+        - Each clip MUST be between 30-60 seconds
+        - Do NOT create clips shorter than 30 seconds
 
         CRITERIA:
-        1. Must have a strong hook.
+        1. Must have a strong hook in the first 5 seconds.
         2. Must be self-contained context.
+        3. Each segment duration = end - start must be >= 30 and <= 60 seconds.
 
         TRANSCRIPT:
         {safe_text} ... (truncated)
 
-        OUTPUT STRICT JSON ONLY:
+        OUTPUT STRICT JSON ONLY (ensure end - start is between 30 and 60 for each):
         [
-          {{ "start": 120.0, "end": 160.0, "title": "Judul_Klip_1" }},
+          {{ "start": 120.0, "end": 165.0, "title": "Judul_Klip_1" }},
           {{ "start": 300.5, "end": 350.0, "title": "Judul_Klip_2" }}
         ]
         """
@@ -732,7 +734,7 @@ class AIAutoShortsApp(ctk.CTk):
         try:
             chat_completion = client.chat.completions.create(
                 messages=[
-                    {"role": "system", "content": "You are a helpful assistant that outputs only valid JSON."},
+                    {"role": "system", "content": "You are a helpful assistant that outputs only valid JSON. Each clip MUST be 30-60 seconds long."},
                     {"role": "user", "content": prompt}
                 ],
                 model="llama-3.3-70b-versatile",
@@ -742,13 +744,37 @@ class AIAutoShortsApp(ctk.CTk):
             result_content = chat_completion.choices[0].message.content
             data = json.loads(result_content)
 
+            clips = []
             if isinstance(data, list):
-                return data
-            if isinstance(data, dict):
+                clips = data
+            elif isinstance(data, dict):
                 for k, v in data.items():
                     if isinstance(v, list):
-                        return v
-            return []
+                        clips = v
+                        break
+
+            # Validate and filter clips - enforce 30-60 second rule
+            valid_clips = []
+            for clip in clips:
+                try:
+                    start = float(clip.get('start', 0))
+                    end = float(clip.get('end', 0))
+                    duration = end - start
+
+                    if duration < 30:
+                        # Extend clip to 30 seconds if too short
+                        self.log("WARNING", f"Clip '{clip.get('title', 'Unknown')}' too short ({duration:.1f}s), extending to 30s")
+                        clip['end'] = start + 30
+                    elif duration > 60:
+                        # Trim clip to 60 seconds if too long
+                        self.log("WARNING", f"Clip '{clip.get('title', 'Unknown')}' too long ({duration:.1f}s), trimming to 60s")
+                        clip['end'] = start + 60
+
+                    valid_clips.append(clip)
+                except:
+                    continue
+
+            return valid_clips
         except Exception as e:
             self.log("ERROR", f"Groq API Error: {str(e)}")
             return []
@@ -769,6 +795,7 @@ class AIAutoShortsApp(ctk.CTk):
             cap = cv2.VideoCapture(temp_sub)
             fps = cap.get(cv2.CAP_PROP_FPS)
             width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
             centers = []
 
@@ -776,9 +803,10 @@ class AIAutoShortsApp(ctk.CTk):
                 # Use OpenCV's built-in Haar Cascade face detector
                 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 
-                frame_skip = 3  # Process every 3rd frame for speed
+                frame_skip = 2  # Process every 2nd frame for better accuracy
                 frame_idx = 0
                 last_x_c = width // 2
+                face_found_count = 0
 
                 while True:
                     ret, frame = cap.read()
@@ -786,23 +814,39 @@ class AIAutoShortsApp(ctk.CTk):
                         break
 
                     if frame_idx % frame_skip == 0:
-                        # Resize for faster detection
-                        small_frame = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
+                        # Resize for faster detection (keeping more resolution for accuracy)
+                        scale = 0.4
+                        small_frame = cv2.resize(frame, (0, 0), fx=scale, fy=scale)
                         gray = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
 
-                        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+                        # Use lower scaleFactor for more accurate detection
+                        faces = face_cascade.detectMultiScale(
+                            gray,
+                            scaleFactor=1.05,  # More accurate
+                            minNeighbors=4,    # More sensitive
+                            minSize=(20, 20)   # Detect smaller faces
+                        )
 
                         if len(faces) > 0:
                             # Get the largest face
                             largest_face = max(faces, key=lambda f: f[2] * f[3])
                             x, y, w, h = largest_face
-                            # Scale back to original size and get center
-                            last_x_c = int((x + w/2) * 2)
+                            # Scale back to original size and get face center
+                            face_center_x = int((x + w/2) / scale)
+
+                            # Smooth transition - don't jump too fast
+                            max_jump = width * 0.05  # Max 5% of width per detection
+                            diff = face_center_x - last_x_c
+                            if abs(diff) > max_jump:
+                                face_center_x = last_x_c + (max_jump if diff > 0 else -max_jump)
+
+                            last_x_c = int(face_center_x)
+                            face_found_count += 1
 
                     centers.append(last_x_c)
                     frame_idx += 1
 
-                self.log("INFO", f"Face tracking: analyzed {len(centers)} frames")
+                self.log("INFO", f"Face tracking: analyzed {len(centers)} frames, {face_found_count} faces detected")
 
             except Exception as e:
                 # Fallback: use center crop if face detection fails
@@ -816,7 +860,9 @@ class AIAutoShortsApp(ctk.CTk):
 
             if not centers:
                 centers = [width//2]
-            window = 15
+
+            # Apply stronger smoothing to prevent jerky movement
+            window = 30  # Larger window for smoother tracking
             if len(centers) > window:
                 centers = np.convolve(centers, np.ones(window)/window, mode='same')
 
