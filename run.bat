@@ -42,6 +42,18 @@ if not exist "%FFMPEG_DIR%\bin\ffmpeg.exe" (
     echo.
 )
 
+REM Check and install Python dependencies
+if exist "%~dp0requirements.txt" (
+    echo [INFO] Checking Python dependencies...
+    python -m pip install -r "%~dp0requirements.txt" -q
+    if errorlevel 1 (
+        echo [WARNING] Some dependencies may have failed to install.
+    ) else (
+        echo [SUCCESS] Dependencies installed!
+    )
+    echo.
+)
+
 echo Starting application...
 echo.
 python app.py
@@ -49,5 +61,6 @@ python app.py
 if errorlevel 1 (
     echo.
     echo [ERROR] Application crashed or Python not found.
+    echo Make sure Python is installed and added to PATH.
     pause
 )
