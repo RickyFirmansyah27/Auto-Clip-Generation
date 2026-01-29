@@ -18,7 +18,8 @@ import yt_dlp
 import torch
 import shutil
 from groq import Groq
-from moviepy.editor import VideoFileClip, TextClip, CompositeVideoClip
+from moviepy.editor import VideoFileClip, TextClip, CompositeVideoClip, ImageClip
+from PIL import Image, ImageDraw, ImageFont
 
 # Set appearance
 ctk.set_appearance_mode("dark")
@@ -219,6 +220,22 @@ class AIAutoShortsApp(ctk.CTk):
         )
         subtitle_label.pack(anchor="w", padx=10, pady=(10, 5))
 
+        # Enable/Disable subtitle checkbox
+        enable_sub_frame = ctk.CTkFrame(subtitle_frame, fg_color="transparent")
+        enable_sub_frame.pack(fill="x", padx=10, pady=5)
+
+        self.enable_subtitle_var = ctk.BooleanVar(value=True)
+        self.enable_subtitle_cb = ctk.CTkCheckBox(
+            enable_sub_frame,
+            text="Enable Subtitles",
+            variable=self.enable_subtitle_var,
+            command=self.toggle_subtitle_options
+        )
+        self.enable_subtitle_cb.pack(side="left")
+
+        # Container for subtitle options (to show/hide)
+        self.subtitle_options_frame = ctk.CTkFrame(subtitle_frame, fg_color="transparent")
+
         # Font Size
         font_size_frame = ctk.CTkFrame(subtitle_frame, fg_color="transparent")
         font_size_frame.pack(fill="x", padx=10, pady=5)
@@ -417,6 +434,11 @@ class AIAutoShortsApp(ctk.CTk):
         if file_path:
             self.file_path_var.set(file_path)
 
+    def toggle_subtitle_options(self):
+        """Toggle subtitle options visibility based on checkbox"""
+        # Just for visual feedback - actual logic handled in config
+        pass
+
     def open_output_folder(self):
         folder = self.output_dir_var.get()
         if os.path.exists(folder):
@@ -489,6 +511,7 @@ class AIAutoShortsApp(ctk.CTk):
             'local_file': self.file_path_var.get().strip() if source_type == "file" else "",
             'clip_count': self.clip_count_var.get(),
             'auto_clip': self.auto_clip_var.get(),
+            'enable_subtitle': self.enable_subtitle_var.get(),
             'font_size': self.font_size_var.get(),
             'font_color': self.font_color_var.get(),
             'font_color_alt': self.font_color_alt_var.get(),
@@ -883,38 +906,75 @@ class AIAutoShortsApp(ctk.CTk):
             # Resize to 1080x1920 (even dimensions for H.264)
             final_clip = clip.fl(crop_fn, apply_to=['mask']).resize((1080, 1920))
 
-            # Add subtitles
+            # Add subtitles (if enabled)
             subs = []
-            vid_w, vid_h = final_clip.w, final_clip.h
-            valid_words = [w for w in segment_words if w['start'] >= start_t and w['end'] <= end_t]
+            if config.get('enable_subtitle', True):
+                vid_w, vid_h = final_clip.w, final_clip.h
+                valid_words = [w for w in segment_words if w['start'] >= start_t and w['end'] <= end_t]
 
-            for w in valid_words:
+                self.log("INFO", f"Adding subtitles: {len(valid_words)} words found")
+
+                # Try to load font
                 try:
-                    raw_text = w.get('word', w.get('text', '')).strip()
-                    if not raw_text:
+                    font_path = "C:/Windows/Fonts/impact.ttf"
+                    if not os.path.exists(font_path):
+                        font_path = "C:/Windows/Fonts/arial.ttf"
+                    font = ImageFont.truetype(font_path, config['font_size'])
+                except:
+                    font = ImageFont.load_default()
+
+                for w in valid_words:
+                    try:
+                        raw_text = w.get('word', w.get('text', '')).strip()
+                        if not raw_text:
+                            continue
+
+                        text = raw_text.upper()
+                        color = config['font_color_alt'] if len(text) <= 3 else config['font_color']
+                        pos_y = int(vid_h * config['text_position'])
+
+                        # Create text image with PIL
+                        # Calculate text size
+                        dummy_img = Image.new('RGBA', (1, 1), (0, 0, 0, 0))
+                        dummy_draw = ImageDraw.Draw(dummy_img)
+                        bbox = dummy_draw.textbbox((0, 0), text, font=font)
+                        text_w = bbox[2] - bbox[0] + 20
+                        text_h = bbox[3] - bbox[1] + 20
+
+                        # Create transparent image with text
+                        txt_img = Image.new('RGBA', (text_w, text_h), (0, 0, 0, 0))
+                        draw = ImageDraw.Draw(txt_img)
+
+                        # Convert hex color to RGB
+                        stroke_c = config['stroke_color'].lstrip('#')
+                        stroke_rgb = tuple(int(stroke_c[i:i+2], 16) for i in (0, 2, 4))
+                        font_c = color.lstrip('#')
+                        font_rgb = tuple(int(font_c[i:i+2], 16) for i in (0, 2, 4))
+
+                        # Draw text with stroke
+                        x, y = 10, 10
+                        stroke_w = config['stroke_width']
+                        for dx in range(-stroke_w, stroke_w+1):
+                            for dy in range(-stroke_w, stroke_w+1):
+                                draw.text((x+dx, y+dy), text, font=font, fill=stroke_rgb)
+                        draw.text((x, y), text, font=font, fill=font_rgb)
+
+                        # Convert to numpy array and create ImageClip
+                        txt_array = np.array(txt_img)
+                        txt_clip = (ImageClip(txt_array, ismask=False)
+                            .set_position(('center', pos_y))
+                            .set_start(w['start'] - start_t)
+                            .set_end(w['end'] - start_t)
+                            .set_duration(w['end'] - w['start']))
+
+                        subs.append(txt_clip)
+                    except Exception as e:
+                        self.log("WARNING", f"Subtitle error: {str(e)[:50]}")
                         continue
 
-                    text = raw_text.upper()
-                    color = config['font_color_alt'] if len(text) <= 3 else config['font_color']
-                    pos_y = config['text_position'] if config['text_position'] > 1 else int(vid_h * config['text_position'])
-
-                    txt_clip = (TextClip(
-                        text,
-                        fontsize=config['font_size'],
-                        color=color,
-                        font='Arial-Bold',
-                        stroke_color=config['stroke_color'],
-                        stroke_width=config['stroke_width'],
-                        method='caption',
-                        size=(int(vid_w * 0.9), None)
-                    )
-                    .set_position(('center', pos_y))
-                    .set_start(w['start'] - start_t)
-                    .set_end(w['end'] - start_t))
-
-                    subs.append(txt_clip)
-                except:
-                    continue
+                self.log("INFO", f"Created {len(subs)} subtitle clips")
+            else:
+                self.log("INFO", "Subtitles disabled")
 
             final = CompositeVideoClip([final_clip] + subs)
 
