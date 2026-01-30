@@ -15,7 +15,6 @@ hasil_shorts/
 # FFmpeg (download separately - too large for git ~200MB)
 ffmpeg-master-latest-win64-gpl/
 ffmpeg.zip
-ffmpeg.exe
 *.zip
 
 # Temporary files

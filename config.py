@@ -44,7 +44,7 @@ DEFAULT_STROKE_WIDTH = 4
 DEFAULT_TEXT_POSITION = 0.75
 SUBTITLE_ANIMATION_DURATION = 0.05
 
-IMAGEMAGICK_PATH = os.getenv("IMAGEMAGICK_PATH", "magick" if os.name == "nt" else "convert")
+IMAGEMAGICK_PATH = r"C:\Program Files\ImageMagick-7.1.2-Q16-HDRI\magick.exe"
 MEDIAPIPE_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite"
 MEDIAPIPE_MODEL_NAME = "blaze_face_short_range.tflite"
 
