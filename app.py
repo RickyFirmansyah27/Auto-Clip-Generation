@@ -131,17 +131,37 @@ with left:
     with st.expander("🎨 Subtitles"):
         enable_subs = st.checkbox("Enable", value=True)
         if enable_subs:
+            # Load fonts from folder
+            font_dir = "fonts"
+            if not os.path.exists(font_dir):
+                os.makedirs(font_dir)
+            
+            local_fonts = [f for f in os.listdir(font_dir) if f.lower().endswith(('.ttf', '.otf'))]
+            default_fonts = ["Impact", "Arial", "Verdana", "Comic Sans MS"]
+            available_fonts = local_fonts + default_fonts # Local fonts first
+            
+            # Smart default: Try to find "Bold" or "Montserrat" in local fonts
+            default_idx = 0
+            for i, f in enumerate(available_fonts):
+                if "bold" in f.lower() or "montserrat" in f.lower():
+                    default_idx = i
+                    break
+            
             c1, c2 = st.columns(2)
             with c1:
-                font_name = st.selectbox("Font", ["Impact", "Arial"])
-                font_size = st.slider("Size", 50, 100, 70)
+                font_name = st.selectbox("Font", available_fonts, index=default_idx)
+                font_size = st.slider("Size", 40, 120, 70)
             with c2:
-                font_color = st.color_picker("Color", "#00FF88")
+                font_color = st.color_picker("Color", "#FFFF00") # Default Yellow
                 stroke_color = st.color_picker("Outline", "#000000")
             stroke_width = st.slider("Outline", 1, 6, 4)
             text_pos = st.slider("Position", 0.6, 0.85, 0.75)
+            
+            # If local font selected, get full path
+            if font_name in local_fonts:
+                font_name = os.path.join(font_dir, font_name)
         else:
-            font_name, font_size, font_color = "Impact", 70, "#00FF88"
+            font_name, font_size, font_color = "Impact", 70, "#FFFF00"
             stroke_color, stroke_width, text_pos = "#000000", 4, 0.75
     
     st.markdown("---")
