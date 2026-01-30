@@ -494,20 +494,26 @@ class VideoProcessor:
                 
                 with vision.FaceDetector.create_from_options(options) as face_detector:
                     frame_idx = 0
-                    last_x_c = width // 2
-                    smoothed_x = float(width // 2)
+                    center_x_default = width // 2
+                    last_x_c = center_x_default
+                    smoothed_x = float(center_x_default)
                     face_found_count = 0
                     frames_to_process = end_frame - start_frame
+                    no_face_count = 0
                     
-                    ema_alpha = 0.12
-                    max_jump_ratio = 0.025
-                    SKIP_FRAMES = 5
+                    ema_alpha = 0.18
+                    max_jump_ratio = 0.02
+                    SKIP_FRAMES = 3
+                    CENTER_PULL_STRENGTH = 0.005
+                    MIN_FACE_AREA_RATIO = 0.01
 
                     while frame_idx < frames_to_process:
                         ret, frame = cap.read()
                         if not ret:
                             break
 
+                        face_detected_this_frame = False
+                        
                         if frame_idx % SKIP_FRAMES == 0:
                             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
@@ -516,11 +522,12 @@ class VideoProcessor:
                             if detection_result.detections:
                                 best_detection = None
                                 max_area = 0
+                                min_area = width * height * MIN_FACE_AREA_RATIO
                                 
                                 for detection in detection_result.detections:
                                     bbox = detection.bounding_box
                                     area = bbox.width * bbox.height
-                                    if area > max_area:
+                                    if area > max_area and area > min_area:
                                         max_area = area
                                         best_detection = bbox
                                 
@@ -537,12 +544,22 @@ class VideoProcessor:
                                     smoothed_x = ema_alpha * target_x + (1 - ema_alpha) * smoothed_x
                                     last_x_c = int(smoothed_x)
                                     face_found_count += 1
+                                    face_detected_this_frame = True
+                                    no_face_count = 0
+                        
+                        if not face_detected_this_frame:
+                            no_face_count += 1
+                            if no_face_count > 10:
+                                pull_to_center = (center_x_default - smoothed_x) * CENTER_PULL_STRENGTH
+                                smoothed_x += pull_to_center
+                                last_x_c = int(smoothed_x)
                         
                         centers.append(int(smoothed_x))
                         frame_idx += 1
 
                 total_tracked = len(centers)
-                self.log("INFO", f"Face tracking: {total_tracked} frames, {face_found_count} detections (skip={SKIP_FRAMES})")
+                detection_rate = (face_found_count / (total_tracked / SKIP_FRAMES)) * 100 if total_tracked > 0 else 0
+                self.log("INFO", f"Face tracking: {total_tracked} frames, {face_found_count} detections ({detection_rate:.0f}%)")
 
             except ImportError:
                 self.log("ERROR", "MediaPipe not installed! Run `pip install mediapipe`")
@@ -560,9 +577,8 @@ class VideoProcessor:
                 centers = [width//2]
 
             from scipy.ndimage import gaussian_filter1d
-            window = 60
-            if len(centers) > window:
-                centers = gaussian_filter1d(centers, sigma=window/3)
+            sigma = min(90, len(centers) // 4) if len(centers) > 30 else 10
+            centers = gaussian_filter1d(centers, sigma=sigma)
 
             def crop_fn(get_frame, t):
                 idx = int(t * fps)

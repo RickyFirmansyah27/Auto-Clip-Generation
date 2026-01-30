@@ -170,10 +170,36 @@ with left:
     c1, c2 = st.columns([3, 1])
     with c1:
         def enable_processing():
-            st.session_state.processing = True
-            st.session_state.cancelling = False
+            if 'processor' in st.session_state and st.session_state.processor:
+                st.session_state.processor.stop_processing()
+            
+            if 'worker_thread' in st.session_state:
+                st.session_state.worker_thread = None
+            if 'processor' in st.session_state:
+                st.session_state.processor = None
+            if 'process_complete' in st.session_state:
+                st.session_state.process_complete.clear()
             if 'processing_done' in st.session_state:
                 del st.session_state.processing_done
+            if 'process_error' in st.session_state:
+                st.session_state.process_error = [None]
+            
+            st.session_state.logs = []
+            st.session_state.completed_videos = []
+            
+            for folder in ['temp']:
+                if os.path.exists(folder):
+                    try:
+                        shutil.rmtree(folder)
+                    except:
+                        pass
+            os.makedirs('temp', exist_ok=True)
+            os.makedirs('hasil_shorts', exist_ok=True)
+            
+            gc.collect()
+            
+            st.session_state.processing = True
+            st.session_state.cancelling = False
 
         st.button("⚡ Generate", type="primary", use_container_width=True, 
                   disabled=st.session_state.processing, on_click=enable_processing)
@@ -435,7 +461,8 @@ if st.session_state.processing:
                 import traceback
                 traceback.print_exc()
             finally:
-                # Optional: Auto-reset processing state after delay or leave it for user to see results
-                # st.session_state.processing = False
-                pass
+                st.session_state.processing = False
+                st.session_state.worker_thread = None
+                st.session_state.processor = None
+                st.rerun()
 
