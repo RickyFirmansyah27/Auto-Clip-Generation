@@ -445,9 +445,6 @@ class VideoProcessor:
             
             self.log("INFO", f"📹 Source video: {total_width}x{total_height} @ {total_fps:.1f}fps")
             
-            if total_height < 1080:
-                self.log("WARNING", f"⚠️ Source video is NOT HD! ({total_height}p) - Quality may be limited")
-            
             start_frame = int(start_t * total_fps)
             end_frame = int(end_t * total_fps)
             cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)

@@ -205,8 +205,11 @@ with left:
             st.session_state.processing = True
             st.session_state.cancelling = False
 
-        st.button("⚡ Generate", type="primary", use_container_width=True, 
-                  disabled=st.session_state.processing, on_click=enable_processing)
+        if st.session_state.processing:
+            st.button("⏳ Processing...", type="primary", use_container_width=True, disabled=True)
+        else:
+            st.button("⚡ Generate", type="primary", use_container_width=True, 
+                      disabled=st.session_state.processing, on_click=enable_processing)
     with c2:
         def cancel_processing():
             st.session_state.cancelling = True
@@ -252,7 +255,7 @@ with left:
             gc.collect()
 
         if st.session_state.processing:
-            st.button("❌ Cancel", use_container_width=True, on_click=cancel_processing, 
+            st.button("Cancel", use_container_width=True, on_click=cancel_processing, 
                       help="Stop all processing", type="primary")
         else:
             st.button("🔄 Reset", use_container_width=True, on_click=reset_all,
