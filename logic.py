@@ -5,9 +5,13 @@ import numpy as np
 import yt_dlp
 import torch
 import shutil
+import threading
 from groq import Groq
 from moviepy.editor import VideoFileClip, CompositeVideoClip, TextClip
 from moviepy.config import change_settings
+
+_model_download_lock = threading.Lock()
+_mediapipe_model_path = None
 
 change_settings({"IMAGEMAGICK_BINARY": r"C:\Program Files\ImageMagick-7.1.2-Q16-HDRI\magick.exe"})
 
@@ -448,47 +452,101 @@ class VideoProcessor:
             centers = []
 
             try:
-                face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+                import mediapipe as mp
+                from mediapipe.tasks import python
+                from mediapipe.tasks.python import vision
+                import urllib.request
                 
-                frame_idx = 0
-                last_x_c = width // 2
-                face_found_count = 0
-
-                while True:
-                    ret, frame = cap.read()
-                    if not ret:
-                        break
-
-                    if frame_idx % 3 == 0:
-                        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                        
-                        faces = face_cascade.detectMultiScale(
-                            gray,
-                            scaleFactor=1.1,
-                            minNeighbors=5,
-                            minSize=(50, 50)
+                global _mediapipe_model_path
+                
+                with _model_download_lock:
+                    if _mediapipe_model_path is None or not os.path.exists(_mediapipe_model_path):
+                        model_path = os.path.join(temp_dir, "blaze_face_short_range.tflite")
+                        if not os.path.exists(model_path):
+                            self.log("INFO", "Downloading MediaPipe face detection model...")
+                            model_url = "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite"
+                            urllib.request.urlretrieve(model_url, model_path)
+                            self.log("SUCCESS", "Model downloaded!")
+                        _mediapipe_model_path = model_path
+                
+                use_gpu = torch.cuda.is_available()
+                if use_gpu:
+                    try:
+                        delegate = python.BaseOptions.Delegate.GPU
+                        base_options = python.BaseOptions(
+                            model_asset_path=_mediapipe_model_path,
+                            delegate=delegate
                         )
-                        
-                        if len(faces) > 0:
-                            largest = max(faces, key=lambda f: f[2] * f[3])
-                            x, y, w, h = largest
-                            center_x = x + w // 2
-                            
-                            max_jump = width * 0.08
-                            diff = center_x - last_x_c
-                            if abs(diff) > max_jump:
-                                center_x = int(last_x_c + (max_jump if diff > 0 else -max_jump))
-                            
-                            last_x_c = center_x
-                            face_found_count += 1
+                        self.log("INFO", "🚀 Face detection using GPU delegate")
+                    except Exception:
+                        base_options = python.BaseOptions(model_asset_path=_mediapipe_model_path)
+                        self.log("INFO", "Face detection using CPU (GPU delegate failed)")
+                else:
+                    base_options = python.BaseOptions(model_asset_path=_mediapipe_model_path)
+                
+                options = vision.FaceDetectorOptions(
+                    base_options=base_options,
+                    min_detection_confidence=0.5
+                )
+                
+                with vision.FaceDetector.create_from_options(options) as face_detector:
+                    frame_idx = 0
+                    last_x_c = width // 2
+                    smoothed_x = float(width // 2)
+                    face_found_count = 0
                     
-                    centers.append(last_x_c)
-                    frame_idx += 1
+                    ema_alpha = 0.15
+                    max_jump_ratio = 0.03
 
-                self.log("INFO", f"Face tracking: {len(centers)} frames, {face_found_count} detections")
+                    while True:
+                        ret, frame = cap.read()
+                        if not ret:
+                            break
+
+                        if frame_idx % 2 == 0:
+                            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+                            detection_result = face_detector.detect(mp_image)
+                            
+                            if detection_result.detections:
+                                best_detection = None
+                                max_area = 0
+                                
+                                for detection in detection_result.detections:
+                                    bbox = detection.bounding_box
+                                    area = bbox.width * bbox.height
+                                    if area > max_area:
+                                        max_area = area
+                                        best_detection = bbox
+                                
+                                if best_detection:
+                                    raw_center_x = best_detection.origin_x + best_detection.width // 2
+                                    
+                                    max_jump = width * max_jump_ratio
+                                    diff = raw_center_x - last_x_c
+                                    if abs(diff) > max_jump:
+                                        target_x = last_x_c + (max_jump if diff > 0 else -max_jump)
+                                    else:
+                                        target_x = raw_center_x
+                                    
+                                    smoothed_x = ema_alpha * target_x + (1 - ema_alpha) * smoothed_x
+                                    last_x_c = int(smoothed_x)
+                                    face_found_count += 1
+                        
+                        centers.append(int(smoothed_x))
+                        frame_idx += 1
+
+                self.log("INFO", f"Face tracking (MediaPipe): {len(centers)} frames, {face_found_count} detections")
+
+            except ImportError:
+                self.log("ERROR", "MediaPipe not installed! Run `pip install mediapipe`")
+                cap.release()
+                cap = cv2.VideoCapture(temp_sub)
+                frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                centers = [width // 2] * max(1, frame_count)
 
             except Exception as e:
-                self.log("WARNING", f"Face tracking failed: {str(e)[:40]}")
+                self.log("WARNING", f"Face tracking failed: {str(e)[:100]}")
                 cap.release()
                 cap = cv2.VideoCapture(temp_sub)
                 frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -499,9 +557,10 @@ class VideoProcessor:
             if not centers:
                 centers = [width//2]
 
-            window = 30
+            from scipy.ndimage import gaussian_filter1d
+            window = 60
             if len(centers) > window:
-                centers = np.convolve(centers, np.ones(window)/window, mode='same')
+                centers = gaussian_filter1d(centers, sigma=window/3)
 
             def crop_fn(get_frame, t):
                 idx = int(t * fps)

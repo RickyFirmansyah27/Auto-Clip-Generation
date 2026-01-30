@@ -12,3 +12,4 @@ python-dotenv
 customtkinter
 streamlit
 faster-whisper
+scipy

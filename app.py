@@ -6,6 +6,10 @@ import gc
 import shutil
 import signal
 import sys
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from logic import VideoProcessor
 
 def signal_handler(sig, frame):
@@ -62,6 +66,15 @@ st.markdown("""
         background: #1a1a1a !important;
         border: 1px solid #333 !important;
         color: #888 !important;
+    }
+    
+    /* Cancel button - red style */
+    div[data-testid="column"]:last-child .stButton > button[kind="primary"] {
+        background: #ff4444 !important;
+        color: #fff !important;
+    }
+    div[data-testid="column"]:last-child .stButton > button[kind="primary"]:hover {
+        background: #ff6666 !important;
     }
     
     .stProgress > div > div > div {background: #00ff88 !important;}
@@ -151,33 +164,69 @@ with left:
     
     st.markdown("---")
     
+    if 'cancelling' not in st.session_state:
+        st.session_state.cancelling = False
+    
     c1, c2 = st.columns([3, 1])
     with c1:
         def enable_processing():
             st.session_state.processing = True
+            st.session_state.cancelling = False
+            if 'processing_done' in st.session_state:
+                del st.session_state.processing_done
 
         st.button("⚡ Generate", type="primary", use_container_width=True, 
                   disabled=st.session_state.processing, on_click=enable_processing)
     with c2:
-        def reset_state():
+        def cancel_processing():
+            st.session_state.cancelling = True
             if 'processor' in st.session_state and st.session_state.processor:
                 st.session_state.processor.stop_processing()
             
             st.session_state.processing = False
-            # cleanup_folders() # Don't delete immediately if thread is still writing, relies on next run
-            st.session_state.logs = []
+            st.session_state.logs.append(("WARNING", "🛑 Cancelling all processes..."))
             
-            # Clear worker state
             if 'worker_thread' in st.session_state:
                 st.session_state.worker_thread = None
             if 'processor' in st.session_state:
                 st.session_state.processor = None
             if 'process_complete' in st.session_state:
-                 st.session_state.process_complete.clear() # Reset event
+                st.session_state.process_complete.set()
+            
+            gc.collect()
+            st.session_state.cancelling = False
+        
+        def reset_all():
+            st.session_state.processing = False
+            st.session_state.cancelling = False
+            st.session_state.logs = []
+            st.session_state.completed_videos = []
+            
+            if 'worker_thread' in st.session_state:
+                st.session_state.worker_thread = None
+            if 'processor' in st.session_state:
+                st.session_state.processor = None
+            if 'process_complete' in st.session_state:
+                st.session_state.process_complete.clear()
+            if 'processing_done' in st.session_state:
+                del st.session_state.processing_done
+            
+            for folder in ['temp', 'hasil_shorts']:
+                if os.path.exists(folder):
+                    try:
+                        shutil.rmtree(folder)
+                    except Exception as e:
+                        print(f"Error cleaning {folder}: {e}")
+            os.makedirs('hasil_shorts', exist_ok=True)
             
             gc.collect()
 
-        st.button("🔄", use_container_width=True, help="Reset", on_click=reset_state)
+        if st.session_state.processing:
+            st.button("❌ Cancel", use_container_width=True, on_click=cancel_processing, 
+                      help="Stop all processing", type="primary")
+        else:
+            st.button("🔄 Reset", use_container_width=True, on_click=reset_all,
+                      help="Reset all settings and clear files")
 
 with right:
     st.markdown("**📊 Status & Logs**")
@@ -290,12 +339,20 @@ if st.session_state.processing:
                  # Reconstruct path for existing run
                  config['local_file'] = f"temp/{local_file.name}"
         
-        # Callbacks that put data into the session_state queues
+        
+        # Capture session state objects to local variables for thread safety
+        # The thread cannot access st.session_state directly efficiently without context
+        log_queue = st.session_state.log_queue
+        progress_queue = st.session_state.progress_queue
+        process_complete = st.session_state.process_complete
+        process_error = st.session_state.process_error
+
+        # Callbacks that put data into the queues (using local references)
         def log_cb(lvl, msg):
-            st.session_state.log_queue.put((lvl, msg))
+            log_queue.put((lvl, msg))
         
         def prog_cb(v, t):
-            st.session_state.progress_queue.put((v, t))
+            progress_queue.put((v, t))
         
         def process_queues():
             # Process Log Queue
@@ -331,9 +388,9 @@ if st.session_state.processing:
                     try:
                         processor.process_video(config, progress_callback=prog_cb)
                     except Exception as e:
-                        st.session_state.process_error[0] = e
+                        process_error[0] = e
                     finally:
-                        st.session_state.process_complete.set()
+                        process_complete.set()
                 
                 t = threading.Thread(target=process_wrapper, daemon=True)
                 st.session_state.worker_thread = t
