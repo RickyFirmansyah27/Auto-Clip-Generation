@@ -115,7 +115,7 @@ class VideoProcessor:
             from clip_manager import ClipTaskManager
             
             total_clips = len(clips_data)
-            max_workers = min(4, total_clips)
+            max_workers = min(6, total_clips)
             
             if progress_callback: progress_callback(0.5, f"🎬 Processing {total_clips} clips in parallel...")
             self.log("INFO", f"🚀 Starting parallel processing: {total_clips} clips with {max_workers} worker(s)")
@@ -432,22 +432,25 @@ class VideoProcessor:
             return []
 
     def process_single_clip(self, source_video, start_t, end_t, clip_name, segment_words, config, temp_dir, output_dir, video_callback=None):
-        """Process a single clip with face tracking and subtitles"""
+        """Process a single clip with face tracking and subtitles - OPTIMIZED"""
+        import time
+        perf_start = time.perf_counter()
+        
         try:
             safe_clip_name = ''.join(c if c.isalnum() else '_' for c in clip_name)[:50]
             
-            full_clip = VideoFileClip(source_video)
-            if end_t > full_clip.duration:
-                end_t = full_clip.duration
-            clip = full_clip.subclip(start_t, end_t)
-
-            temp_sub = f"{temp_dir}/temp_{safe_clip_name}.mp4"
-            clip.write_videofile(temp_sub, codec='libx264', audio_codec='aac', logger=None)
-
-            cap = cv2.VideoCapture(temp_sub)
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            cap = cv2.VideoCapture(source_video)
+            total_fps = cap.get(cv2.CAP_PROP_FPS)
+            total_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            total_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            
+            start_frame = int(start_t * total_fps)
+            end_frame = int(end_t * total_fps)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+            
+            width = total_width
+            height = total_height
+            fps = total_fps
 
             centers = []
 
@@ -494,16 +497,18 @@ class VideoProcessor:
                     last_x_c = width // 2
                     smoothed_x = float(width // 2)
                     face_found_count = 0
+                    frames_to_process = end_frame - start_frame
                     
-                    ema_alpha = 0.15
-                    max_jump_ratio = 0.03
+                    ema_alpha = 0.12
+                    max_jump_ratio = 0.025
+                    SKIP_FRAMES = 5
 
-                    while True:
+                    while frame_idx < frames_to_process:
                         ret, frame = cap.read()
                         if not ret:
                             break
 
-                        if frame_idx % 2 == 0:
+                        if frame_idx % SKIP_FRAMES == 0:
                             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
                             detection_result = face_detector.detect(mp_image)
@@ -536,20 +541,17 @@ class VideoProcessor:
                         centers.append(int(smoothed_x))
                         frame_idx += 1
 
-                self.log("INFO", f"Face tracking (MediaPipe): {len(centers)} frames, {face_found_count} detections")
+                total_tracked = len(centers)
+                self.log("INFO", f"Face tracking: {total_tracked} frames, {face_found_count} detections (skip={SKIP_FRAMES})")
 
             except ImportError:
                 self.log("ERROR", "MediaPipe not installed! Run `pip install mediapipe`")
-                cap.release()
-                cap = cv2.VideoCapture(temp_sub)
-                frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                frame_count = end_frame - start_frame
                 centers = [width // 2] * max(1, frame_count)
 
             except Exception as e:
                 self.log("WARNING", f"Face tracking failed: {str(e)[:100]}")
-                cap.release()
-                cap = cv2.VideoCapture(temp_sub)
-                frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                frame_count = end_frame - start_frame
                 centers = [width // 2] * max(1, frame_count)
 
             cap.release()
@@ -574,25 +576,36 @@ class VideoProcessor:
                 x1 = max(0, min(w - target_width, x1))
                 return img[:, x1:x1+target_width]
 
+            full_clip = VideoFileClip(source_video)
+            if end_t > full_clip.duration:
+                end_t = full_clip.duration
+            clip = full_clip.subclip(start_t, end_t)
+            
             final_clip = clip.fl(crop_fn, apply_to=['mask']).resize((1080, 1920))
             
             safe_name = "".join([c for c in clip_name if c.isalnum() or c == '_'])
             output_filename = f"{output_dir}/{safe_name}.mp4"
             temp_video_noSub = f"{temp_dir}/temp_nosub_{safe_name}.mp4"
             
+            app_env = os.getenv("APP_ENV", "production").lower()
+            use_gpu_encode = app_env == "local"
+            encode_preset = 'fast' if use_gpu_encode else 'ultrafast'
+            
             final_clip.write_videofile(
                 temp_video_noSub,
                 codec='libx264',
                 audio_codec='aac',
                 fps=30,
-                preset='medium',
+                preset=encode_preset,
                 threads=4,
                 logger=None,
-                bitrate='10M'
+                bitrate='8M'
             )
             
             full_clip.close()
             final_clip.close()
+            
+            face_track_time = time.perf_counter() - perf_start
 
             if config.get('enable_subtitle', True):
                 valid_words = [w for w in segment_words if w['start'] >= start_t and w['end'] <= end_t]
@@ -703,12 +716,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             else:
                 shutil.copy(temp_video_noSub, output_filename)
             
-            if os.path.exists(temp_sub):
-                os.remove(temp_sub)
             if os.path.exists(temp_video_noSub):
                 os.remove(temp_video_noSub)
 
-            self.log("SUCCESS", f"Saved: {output_filename}")
+            total_time = time.perf_counter() - perf_start
+            self.log("SUCCESS", f"✅ Saved: {output_filename} ({total_time:.1f}s)")
             
             if video_callback:
                 video_callback(output_filename)
