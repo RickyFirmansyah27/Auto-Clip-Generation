@@ -158,25 +158,23 @@ class VideoProcessor:
             os.remove(output_path)
 
         ydl_opts = {
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best',
+            'format': 'bestvideo[height>=1080]+bestaudio/bestvideo[height>=720]+bestaudio/bestvideo+bestaudio/best',
             'outtmpl': f"{temp_dir}/raw_video.%(ext)s",
             'merge_output_format': 'mp4',
-            'quiet': True,
-            'no_warnings': True,
-            'socket_timeout': 30,
-            'retries': 5,
-            'extractor_args': {
-                'youtube': {
-                    'player_client': ['android', 'web'],
-                    'player_skip': ['web_creator', 'tv_embedded']
-                }
-            },
+            'quiet': False,
+            'no_warnings': False,
+            'socket_timeout': 60,
+            'retries': 10,
+            'fragment_retries': 10,
             'nocheckcertificate': True,
+            'prefer_ffmpeg': True,
             'postprocessors': [{
                 'key': 'FFmpegVideoConvertor',
                 'preferedformat': 'mp4',
             }],
         }
+        
+        self.log("INFO", "🎬 Downloading HD video (1080p/720p)...")
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -445,6 +443,11 @@ class VideoProcessor:
             total_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             total_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             
+            self.log("INFO", f"📹 Source video: {total_width}x{total_height} @ {total_fps:.1f}fps")
+            
+            if total_height < 1080:
+                self.log("WARNING", f"⚠️ Source video is NOT HD! ({total_height}p) - Quality may be limited")
+            
             start_frame = int(start_t * total_fps)
             end_frame = int(end_t * total_fps)
             cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
@@ -591,25 +594,54 @@ class VideoProcessor:
                 end_t = full_clip.duration
             clip = full_clip.subclip(start_t, end_t)
             
-            final_clip = clip.fl(crop_fn, apply_to=['mask']).resize((cfg.OUTPUT_WIDTH, cfg.OUTPUT_HEIGHT))
+            cropped_clip = clip.fl(crop_fn, apply_to=['mask'])
             
             safe_name = "".join([c for c in clip_name if c.isalnum() or c == '_'])
             output_filename = f"{output_dir}/{safe_name}.mp4"
+            temp_video_cropped = f"{temp_dir}/temp_cropped_{safe_name}.mp4"
             temp_video_noSub = f"{temp_dir}/temp_nosub_{safe_name}.mp4"
             
-            final_clip.write_videofile(
-                temp_video_noSub,
+            cropped_clip.write_videofile(
+                temp_video_cropped,
                 codec=cfg.CPU_VIDEO_CODEC,
                 audio_codec='aac',
                 fps=cfg.OUTPUT_FPS,
-                preset=cfg.get_encode_preset(),
+                preset='ultrafast',
                 threads=4,
                 logger=None,
-                bitrate=cfg.VIDEO_BITRATE
+                bitrate='50M'
             )
             
             full_clip.close()
-            final_clip.close()
+            cropped_clip.close()
+            
+            self.log("INFO", "🔄 Re-encoding with high quality (no scaling)...")
+            
+            encode_cmd = [
+                'ffmpeg', '-y',
+                '-i', temp_video_cropped,
+                '-c:v', cfg.CPU_VIDEO_CODEC,
+                '-preset', cfg.get_encode_preset(),
+                '-crf', cfg.VIDEO_CRF,
+                '-b:v', cfg.VIDEO_BITRATE,
+                '-maxrate', cfg.VIDEO_BITRATE_MAX,
+                '-bufsize', cfg.VIDEO_BUFSIZE,
+                '-profile:v', 'high',
+                '-level', '4.2',
+                '-pix_fmt', 'yuv420p',
+                '-c:a', 'aac',
+                '-b:a', cfg.AUDIO_BITRATE,
+                temp_video_noSub
+            ]
+            
+            encode_result = subprocess.run(encode_cmd, capture_output=True, text=True)
+            
+            if encode_result.returncode != 0:
+                self.log("WARNING", f"FFmpeg encode failed: {encode_result.stderr[:200]}")
+                shutil.copy(temp_video_cropped, temp_video_noSub)
+            
+            if os.path.exists(temp_video_cropped):
+                os.remove(temp_video_cropped)
             
             face_track_time = time.perf_counter() - perf_start
 
@@ -693,6 +725,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     '-vf', f"ass='{ass_path.replace(chr(92), '/')}'",
                     '-c:v', video_codec,
                     '-preset', preset,
+                    '-crf', cfg.VIDEO_CRF,
                     '-b:v', cfg.VIDEO_BITRATE,
                     '-maxrate', cfg.VIDEO_BITRATE_MAX,
                     '-bufsize', cfg.VIDEO_BUFSIZE,

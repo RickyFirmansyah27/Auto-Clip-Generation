@@ -10,12 +10,13 @@ FONT_DIR = "fonts"
 
 MAX_WORKERS = 6
 OUTPUT_FPS = 30
-OUTPUT_WIDTH = 1080
-OUTPUT_HEIGHT = 1920
+OUTPUT_WIDTH = 720
+OUTPUT_HEIGHT = 1280
 VIDEO_BITRATE = "8M"
-VIDEO_BITRATE_MAX = "10M"
+VIDEO_BITRATE_MAX = "12M"
 VIDEO_BUFSIZE = "16M"
-AUDIO_BITRATE = "256k"
+AUDIO_BITRATE = "320k"
+VIDEO_CRF = "18"
 
 FACE_SKIP_FRAMES = 3
 FACE_EMA_ALPHA = 0.18
@@ -27,11 +28,11 @@ FACE_NO_DETECT_THRESHOLD = 10
 GAUSSIAN_SIGMA_MAX = 90
 GAUSSIAN_SIGMA_MIN = 10
 
-ENCODE_PRESET_GPU = "fast"
-ENCODE_PRESET_CPU = "ultrafast"
+ENCODE_PRESET_GPU = "slow"
+ENCODE_PRESET_CPU = "medium"
 GPU_VIDEO_CODEC = "h264_nvenc"
 CPU_VIDEO_CODEC = "libx264"
-NVENC_PRESET = "p4"
+NVENC_PRESET = "p2"
 CPU_PRESET_FINAL = "slow"
 
 DEFAULT_FONT = "Impact"
@@ -54,7 +55,7 @@ AUDIO_MAX_SIZE_MB = 20
 
 YT_DLP_SOCKET_TIMEOUT = 30
 YT_DLP_RETRIES = 5
-YT_DLP_FORMAT = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
+YT_DLP_FORMAT = "bestvideo[height>=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height>=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
 
 APP_TITLE = "ClipGenAI"
 APP_ICON = "✂️"
