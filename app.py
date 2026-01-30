@@ -144,24 +144,24 @@ with left:
             font_name, font_size, font_color = "Impact", 70, "#00FF88"
             stroke_color, stroke_width, text_pos = "#000000", 4, 0.75
     
-st.markdown("---")
+    st.markdown("---")
+    
+    # Buttons
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        def enable_processing():
+            st.session_state.processing = True
 
-# Buttons
-c1, c2 = st.columns([3, 1])
-with c1:
-    def enable_processing():
-        st.session_state.processing = True
+        st.button("⚡ Generate", type="primary", use_container_width=True, 
+                  disabled=st.session_state.processing, on_click=enable_processing)
+    with c2:
+        def reset_state():
+            st.session_state.processing = False
+            cleanup_folders()
+            st.session_state.logs = []
+            gc.collect()
 
-    st.button("⚡ Generate", type="primary", use_container_width=True, 
-              disabled=st.session_state.processing, on_click=enable_processing)
-with c2:
-    def reset_state():
-        st.session_state.processing = False
-        cleanup_folders()
-        st.session_state.logs = []
-        gc.collect()
-
-    st.button("🔄", use_container_width=True, help="Reset", on_click=reset_state)
+        st.button("🔄", use_container_width=True, help="Reset", on_click=reset_state)
 
 # Right Column - Status & Logs
 with right:
@@ -172,8 +172,8 @@ with right:
     # Log Box (tall, scrollable, show all logs)
     log_placeholder = st.empty()
     def render_logs():
-        # Taller log box (600px) with scroll, showing ALL logs without trimming
-        html = '<div class="log-box" style="max-height: 600px; overflow-y: auto; min-height: 300px;">'
+        # Log box aligned with left column (approx 450px)
+        html = '<div class="log-box" style="max-height: 450px; overflow-y: auto; min-height: 400px;">'
         # Show ALL logs, no limit
         for lvl, msg in st.session_state.logs:
             c = {"SUCCESS":"#00ff88","ERROR":"#ff4444","WARNING":"#ffaa00","INFO":"#00aaff"}.get(lvl,"#888")
