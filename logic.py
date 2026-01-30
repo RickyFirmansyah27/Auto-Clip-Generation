@@ -9,14 +9,13 @@ from groq import Groq
 from moviepy.editor import VideoFileClip, CompositeVideoClip, TextClip
 from moviepy.config import change_settings
 
-# Configure ImageMagick
 change_settings({"IMAGEMAGICK_BINARY": r"C:\Program Files\ImageMagick-7.1.2-Q16-HDRI\magick.exe"})
 
 class VideoProcessor:
     def __init__(self, log_callback=None):
         self.log_callback = log_callback
         self.cancel_flag = False
-        self.task_manager = None  # Will be set during parallel processing
+        self.task_manager = None
 
     def log(self, level, message):
         if self.log_callback:
@@ -27,7 +26,6 @@ class VideoProcessor:
     def stop_processing(self):
         self.cancel_flag = True
         self.log("WARNING", "Stop signal received...")
-        # Also cancel the task manager if it exists
         if self.task_manager:
             self.task_manager.cancel()
 
@@ -36,14 +34,12 @@ class VideoProcessor:
         temp_dir = "temp"
         output_dir = config['output_dir']
 
-        # Create directories
         if not os.path.exists(temp_dir):
             os.makedirs(temp_dir)
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
 
         try:
-            # 1. Get Source Video
             source_path = None
             
             if config['source_type'] == 'youtube':
@@ -65,7 +61,6 @@ class VideoProcessor:
 
             self.log("SUCCESS", "Video source ready!")
 
-            # 2. Extract Audio
             if progress_callback: progress_callback(0.2, "🎵 Extracting audio...")
             self.log("INFO", "Extracting audio for transcription...")
 
@@ -83,7 +78,6 @@ class VideoProcessor:
 
             if self.cancel_flag: return
 
-            # 3. Transcribe with Groq Whisper API (fastest!) or faster-whisper
             if progress_callback: progress_callback(0.3, "🎤 Transcribing audio...")
             
             whisper_result = self.transcribe_audio(audio_path, config['api_key'])
@@ -101,7 +95,6 @@ class VideoProcessor:
 
             if self.cancel_flag: return
 
-            # 4. Analyze with AI
             if progress_callback: progress_callback(0.4, "🤖 AI analyzing hooks...")
             self.log("INFO", f"Sending to Groq AI for analysis...")
 
@@ -115,16 +108,14 @@ class VideoProcessor:
 
             if self.cancel_flag: return
 
-            # 5. Process clips in parallel
             from clip_manager import ClipTaskManager
             
             total_clips = len(clips_data)
-            max_workers = min(4, total_clips)  # Use up to 4 threads
+            max_workers = min(4, total_clips)
             
             if progress_callback: progress_callback(0.5, f"🎬 Processing {total_clips} clips in parallel...")
             self.log("INFO", f"🚀 Starting parallel processing: {total_clips} clips with {max_workers} worker(s)")
             
-            # Create task manager for parallel execution
             self.task_manager = ClipTaskManager(
                 max_workers=max_workers,
                 log_callback=self.log_callback,
@@ -132,7 +123,6 @@ class VideoProcessor:
                 video_callback=config.get('video_callback')
             )
             
-            # Process all clips in parallel
             completed = self.task_manager.process_clips_parallel(
                 processor=self,
                 clips_data=clips_data,
@@ -149,7 +139,6 @@ class VideoProcessor:
                 self.log("SUCCESS", f"🎉 All done! Completed {completed}/{total_clips} clips")
                 if progress_callback: progress_callback(1.0, "✅ Complete!")
             
-            # Clear the task manager reference after processing
             self.task_manager = None
 
         except Exception as e:
@@ -164,7 +153,6 @@ class VideoProcessor:
             os.remove(output_path)
 
         ydl_opts = {
-            # Download BEST quality available (no resolution limit)
             'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best',
             'outtmpl': f"{temp_dir}/raw_video.%(ext)s",
             'merge_output_format': 'mp4',
@@ -224,9 +212,6 @@ class VideoProcessor:
                     timestamp_granularities=["word"]
                 )
             
-            
-            # Convert Groq response to our format
-            # Handle both dict and object response formats
             words_list = None
             if isinstance(transcription, dict):
                 words_list = transcription.get('words', [])
@@ -238,7 +223,6 @@ class VideoProcessor:
                 current_segment = {"start": 0, "end": 0, "text": "", "words": []}
                 
                 for word in words_list:
-                    # Handle both dict and object word formats
                     if isinstance(word, dict):
                         word_data = {
                             "word": word.get('word', ''),
@@ -255,14 +239,12 @@ class VideoProcessor:
                     current_segment["words"].append(word_data)
                     current_segment["text"] += word_data["word"] + " "
                     
-                    # Create segments every ~10 words or at punctuation
                     if len(current_segment["words"]) >= 10 or word_data["word"].strip().endswith(('.', '?', '!')):
                         current_segment["start"] = current_segment["words"][0]["start"]
                         current_segment["end"] = current_segment["words"][-1]["end"]
                         segments.append(current_segment)
                         current_segment = {"start": 0, "end": 0, "text": "", "words": []}
                 
-                # Add last segment
                 if current_segment["words"]:
                     current_segment["start"] = current_segment["words"][0]["start"]
                     current_segment["end"] = current_segment["words"][-1]["end"]
@@ -278,11 +260,9 @@ class VideoProcessor:
             self.log("WARNING", f"Groq Whisper API failed: {str(e)[:100]}")
             self.log("INFO", "Falling back to faster-whisper...")
         
-        # Method 2: faster-whisper (3-4x faster than standard whisper)
         try:
             from faster_whisper import WhisperModel
             
-            # Detect GPU/CPU with fallback
             device = "cuda" if torch.cuda.is_available() else "cpu"
             compute_type = "float16" if device == "cuda" else "int8"
             
@@ -293,10 +273,9 @@ class VideoProcessor:
                 audio_path,
                 language="id",
                 word_timestamps=True,
-                vad_filter=True  # Voice Activity Detection for better accuracy
+                vad_filter=True
             )
             
-            # Convert to our format
             segments = []
             for segment in segments_iter:
                 words = []
@@ -323,7 +302,6 @@ class VideoProcessor:
         except Exception as e:
             self.log("WARNING", f"faster-whisper failed: {str(e)[:60]}")
         
-        # Method 3: Standard whisper (slowest, last resort)
         try:
             import whisper
             device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -344,23 +322,19 @@ class VideoProcessor:
         """Preprocess audio to reduce file size (downsample to 16kHz mono FLAC)"""
         import subprocess
         
-        # Create preprocessed file path
         temp_dir = os.path.dirname(audio_path)
         preprocessed_path = os.path.join(temp_dir, "preprocessed_audio.flac")
         
-        # Remove old preprocessed file if exists
         if os.path.exists(preprocessed_path):
             os.remove(preprocessed_path)
         
-        # Use FFmpeg to downsample to 16kHz mono FLAC (Groq's recommended format)
-        # This typically reduces file size by 70-80% without quality loss for speech
         ffmpeg_cmd = [
             'ffmpeg', '-y',
             '-i', audio_path,
-            '-ar', '16000',      # Downsample to 16kHz (optimal for speech)
-            '-ac', '1',          # Convert to mono
-            '-map', '0:a',       # Map only audio
-            '-c:a', 'flac',      # FLAC codec (lossless compression)
+            '-ar', '16000',
+            '-ac', '1',
+            '-map', '0:a',
+            '-c:a', 'flac',
             preprocessed_path
         ]
         
@@ -430,7 +404,6 @@ class VideoProcessor:
                         clips = v
                         break
 
-            # Validate and filter clips
             valid_clips = []
             for clip in clips:
                 try:
@@ -457,7 +430,6 @@ class VideoProcessor:
     def process_single_clip(self, source_video, start_t, end_t, clip_name, segment_words, config, temp_dir, output_dir, video_callback=None):
         """Process a single clip with face tracking and subtitles"""
         try:
-            # Sanitize clip name - only allow alphanumeric and underscore
             safe_clip_name = ''.join(c if c.isalnum() else '_' for c in clip_name)[:50]
             
             full_clip = VideoFileClip(source_video)
@@ -465,11 +437,9 @@ class VideoProcessor:
                 end_t = full_clip.duration
             clip = full_clip.subclip(start_t, end_t)
 
-            # Save temp file for face detection
             temp_sub = f"{temp_dir}/temp_{safe_clip_name}.mp4"
             clip.write_videofile(temp_sub, codec='libx264', audio_codec='aac', logger=None)
 
-            # Face tracking with OpenCV Haar Cascade (more reliable)
             cap = cv2.VideoCapture(temp_sub)
             fps = cap.get(cv2.CAP_PROP_FPS)
             width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -489,7 +459,6 @@ class VideoProcessor:
                     if not ret:
                         break
 
-                    # Process every 3rd frame for speed
                     if frame_idx % 3 == 0:
                         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                         
@@ -501,12 +470,10 @@ class VideoProcessor:
                         )
                         
                         if len(faces) > 0:
-                            # Get largest face
                             largest = max(faces, key=lambda f: f[2] * f[3])
                             x, y, w, h = largest
                             center_x = x + w // 2
                             
-                            # Smooth transition
                             max_jump = width * 0.08
                             diff = center_x - last_x_c
                             if abs(diff) > max_jump:
@@ -548,14 +515,12 @@ class VideoProcessor:
                 x1 = max(0, min(w - target_width, x1))
                 return img[:, x1:x1+target_width]
 
-            # Resize to vertical format and save temp video
             final_clip = clip.fl(crop_fn, apply_to=['mask']).resize((1080, 1920))
             
             safe_name = "".join([c for c in clip_name if c.isalnum() or c == '_'])
             output_filename = f"{output_dir}/{safe_name}.mp4"
             temp_video_noSub = f"{temp_dir}/temp_nosub_{safe_name}.mp4"
             
-            # Export video without subtitles (HIGH QUALITY)
             final_clip.write_videofile(
                 temp_video_noSub,
                 codec='libx264',
@@ -564,25 +529,22 @@ class VideoProcessor:
                 preset='medium',
                 threads=4,
                 logger=None,
-                bitrate='10M'  # High bitrate for sharp video
+                bitrate='10M'
             )
             
             full_clip.close()
             final_clip.close()
 
-            # Generate ASS subtitle file for FFmpeg
             if config.get('enable_subtitle', True):
                 valid_words = [w for w in segment_words if w['start'] >= start_t and w['end'] <= end_t]
                 self.log("INFO", f"Creating ASS subtitles: {len(valid_words)} words")
                 
                 ass_path = f"{temp_dir}/subs_{safe_name}.ass"
                 
-                # Font settings
                 font_name = config.get('font_name', 'Impact')
                 font_size = config['font_size']
                 stroke_width = config['stroke_width']
                 
-                # Convert colors from #RRGGBB to ASS format &HBBGGRR&
                 def hex_to_ass(hex_color):
                     hex_color = hex_color.lstrip('#')
                     r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
@@ -592,10 +554,8 @@ class VideoProcessor:
                 secondary_color = hex_to_ass(config['font_color_alt'])
                 outline_color = hex_to_ass(config['stroke_color'])
                 
-                # Calculate Y position (ASS uses pixels from top)
                 margin_v = int(1920 * (1 - config['text_position']))
                 
-                # ASS header with professional styling
                 ass_content = f"""[Script Info]
 Title: Kliperr Subtitles
 ScriptType: v4.00+
@@ -630,7 +590,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                         start_time = time_to_ass(w['start'])
                         end_time = time_to_ass(w['end'])
                         
-                        # Use Highlight style for longer words (Hormozi effect)
                         style = "Highlight" if len(text) > 3 else "Normal"
                         
                         ass_content += f"Dialogue: 0,{start_time},{end_time},{style},,0,0,0,,{text}\n"
@@ -640,18 +599,29 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 with open(ass_path, 'w', encoding='utf-8') as f:
                     f.write(ass_content)
                 
-                # Use FFmpeg directly to burn subtitles with high quality
                 self.log("INFO", "Burning subtitles with FFmpeg...")
                 
                 import subprocess
                 
+                # Check environment for hardware acceleration
+                app_env = os.getenv("APP_ENV", "production").lower()
+                use_gpu = app_env == "local"
+                
+                video_codec = 'h264_nvenc' if use_gpu else 'libx264'
+                preset = 'p4' if use_gpu else 'slow' # p4 is medium preset for nvenc
+                
+                if use_gpu:
+                     self.log("INFO", f"🚀 Using GPU encoding ({video_codec})")
+                else:
+                     self.log("INFO", f"Using CPU encoding ({video_codec})")
+
                 ffmpeg_cmd = [
                     'ffmpeg', '-y',
                     '-i', temp_video_noSub,
                     '-vf', f"ass='{ass_path.replace(chr(92), '/')}'",
-                    '-c:v', 'libx264',
-                    '-preset', 'slow',  # Better quality
-                    '-b:v', '8M',  # High bitrate for sharp video
+                    '-c:v', video_codec,
+                    '-preset', preset,
+                    '-b:v', '8M',
                     '-maxrate', '10M',
                     '-bufsize', '16M',
                     '-profile:v', 'high',
@@ -669,14 +639,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     self.log("WARNING", f"FFmpeg subtitle failed, using video without subs")
                     shutil.copy(temp_video_noSub, output_filename)
                 
-                # Cleanup
                 if os.path.exists(ass_path):
                     os.remove(ass_path)
             else:
-                # No subtitles, just copy
                 shutil.copy(temp_video_noSub, output_filename)
             
-            # Cleanup temp files
             if os.path.exists(temp_sub):
                 os.remove(temp_sub)
             if os.path.exists(temp_video_noSub):
@@ -684,7 +651,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
             self.log("SUCCESS", f"Saved: {output_filename}")
             
-            # Call video callback to show in UI immediately
             if video_callback:
                 video_callback(output_filename)
 

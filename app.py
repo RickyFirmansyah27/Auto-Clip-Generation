@@ -8,20 +8,16 @@ import signal
 import sys
 from logic import VideoProcessor
 
-# === Graceful Exit Handler ===
 def signal_handler(sig, frame):
     print("\n🛑 Shutting down immediately...")
-    # Force exit without waiting for threads
     os._exit(0)
 
 try:
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 except ValueError:
-    # Streamlit runs in a separate thread, so signal handlers might fail
     pass
 
-# === Cleanup ===
 def cleanup_folders():
     for folder in ['temp', 'hasil_shorts']:
         if os.path.exists(folder):
@@ -31,10 +27,8 @@ def cleanup_folders():
                 pass
     os.makedirs('hasil_shorts', exist_ok=True)
 
-# === Config ===
 st.set_page_config(page_title="ClipGenAI", page_icon="✂️", layout="wide")
 
-# === Theme ===
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
@@ -92,7 +86,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# === State ===
 if 'logs' not in st.session_state: st.session_state.logs = []
 if 'processing' not in st.session_state: st.session_state.processing = False
 if 'completed_videos' not in st.session_state: st.session_state.completed_videos = []
@@ -100,20 +93,16 @@ if 'completed_videos' not in st.session_state: st.session_state.completed_videos
 output_dir = 'hasil_shorts'
 os.makedirs(output_dir, exist_ok=True)
 
-# === Header ===
 st.markdown('<div class="title">✂️ Clipping GenAI</div><div class="subtitle">AI Shorts Generator</div>', unsafe_allow_html=True)
 
-# === Layout ===
 left, right = st.columns([1, 1], gap="medium")
 
 with left:
-    # API
     api_key = st.text_input("🔑 API Key", type="password", placeholder="Groq API Key")
     if not api_key: api_key = os.getenv("GROQ_API_KEY", "")
     
     st.markdown("---")
     
-    # Source
     t1, t2 = st.tabs(["📹 YouTube", "📁 Upload"])
     with t1:
         youtube_url = st.text_input("URL", placeholder="https://youtube.com/watch?v=...")
@@ -125,22 +114,19 @@ with left:
     
     st.markdown("---")
     
-    # Settings
     clip_count = st.slider("📊 Number of Clips", 1, 10, 5)
     
     with st.expander("🎨 Subtitles"):
         enable_subs = st.checkbox("Enable", value=True)
         if enable_subs:
-            # Load fonts from folder
             font_dir = "fonts"
             if not os.path.exists(font_dir):
                 os.makedirs(font_dir)
             
             local_fonts = [f for f in os.listdir(font_dir) if f.lower().endswith(('.ttf', '.otf'))]
             default_fonts = ["Impact", "Arial", "Verdana", "Comic Sans MS"]
-            available_fonts = local_fonts + default_fonts # Local fonts first
+            available_fonts = local_fonts + default_fonts
             
-            # Smart default: Try to find "Bold" or "Montserrat" in local fonts
             default_idx = 0
             for i, f in enumerate(available_fonts):
                 if "bold" in f.lower() or "montserrat" in f.lower():
@@ -152,12 +138,11 @@ with left:
                 font_name = st.selectbox("Font", available_fonts, index=default_idx)
                 font_size = st.slider("Size", 40, 120, 70)
             with c2:
-                font_color = st.color_picker("Color", "#FFFF00") # Default Yellow
+                font_color = st.color_picker("Color", "#FFFF00")
                 stroke_color = st.color_picker("Outline", "#000000")
             stroke_width = st.slider("Outline", 1, 6, 4)
             text_pos = st.slider("Position", 0.6, 0.85, 0.75)
             
-            # If local font selected, get full path
             if font_name in local_fonts:
                 font_name = os.path.join(font_dir, font_name)
         else:
@@ -166,7 +151,6 @@ with left:
     
     st.markdown("---")
     
-    # Buttons
     c1, c2 = st.columns([3, 1])
     with c1:
         def enable_processing():
@@ -176,28 +160,35 @@ with left:
                   disabled=st.session_state.processing, on_click=enable_processing)
     with c2:
         def reset_state():
+            if 'processor' in st.session_state and st.session_state.processor:
+                st.session_state.processor.stop_processing()
+            
             st.session_state.processing = False
-            cleanup_folders()
+            # cleanup_folders() # Don't delete immediately if thread is still writing, relies on next run
             st.session_state.logs = []
+            
+            # Clear worker state
+            if 'worker_thread' in st.session_state:
+                st.session_state.worker_thread = None
+            if 'processor' in st.session_state:
+                st.session_state.processor = None
+            if 'process_complete' in st.session_state:
+                 st.session_state.process_complete.clear() # Reset event
+            
             gc.collect()
 
         st.button("🔄", use_container_width=True, help="Reset", on_click=reset_state)
 
-# Right Column - Status & Logs
 with right:
     st.markdown("**📊 Status & Logs**")
     progress = st.progress(0)
     status = st.empty()
     
-    # Log Box (tall, scrollable, show all logs)
     log_placeholder = st.empty()
     def render_logs():
-        # Log box aligned with left column (approx 450px)
         html = '<div class="log-box" style="max-height: 450px; overflow-y: auto; min-height: 400px;">'
-        # Show ALL logs, no limit
         for lvl, msg in st.session_state.logs:
             c = {"SUCCESS":"#00ff88","ERROR":"#ff4444","WARNING":"#ffaa00","INFO":"#00aaff"}.get(lvl,"#888")
-            # Show FULL message, no character limit
             html += f'<div style="color:{c}; margin-bottom: 0.3rem; font-size: 0.85rem; line-height: 1.3;">• {msg}</div>'
         if not st.session_state.logs:
             html += '<div style="color:#555;text-align:center;padding:3rem;">🎬 Ready</div>'
@@ -206,9 +197,6 @@ with right:
     
     render_logs()
 
-
-
-# === Video Gallery (Bottom) ===
 st.markdown("---")
 st.markdown("### 🎬 Generated Videos")
 video_gallery_placeholder = st.empty()
@@ -218,19 +206,15 @@ def render_gallery():
         if os.path.exists(output_dir):
             files = sorted([f for f in os.listdir(output_dir) if f.endswith(".mp4")])
             if files:
-                # Use chunks of 4 for better grid layout
                 cols = st.columns(4)
                 for i, f in enumerate(files):
                     file_path = os.path.join(output_dir, f)
                     with cols[i % 4]:
                         st.video(file_path)
 
-# Initial render
 render_gallery()
 
-# === Process ===
 if st.session_state.processing:
-    # Validation
     valid = True
     if not api_key:
         st.toast("❌ Enter API Key")
@@ -247,14 +231,33 @@ if st.session_state.processing:
         st.rerun()
     
     else:
-        if not st.session_state.logs: # Simple heuristic: if logs empty, probably fresh start
-             cleanup_folders()
-        
-        # Live Video Callback - just notifies that a video is ready
+        # Initialize session state variables for the worker if they don't exist
+        if 'worker_thread' not in st.session_state:
+            st.session_state.worker_thread = None
+        if 'processor' not in st.session_state:
+            st.session_state.processor = None
+        if 'log_queue' not in st.session_state:
+            st.session_state.log_queue = queue.Queue()
+        if 'progress_queue' not in st.session_state:
+            st.session_state.progress_queue = queue.Queue()
+        if 'process_complete' not in st.session_state:
+            st.session_state.process_complete = threading.Event()
+        if 'process_error' not in st.session_state:
+            st.session_state.process_error = [None]  # Use list to be mutable
+
+        # Clear previous run data only if starting fresh (thread is None)
+        if st.session_state.worker_thread is None:
+             if not st.session_state.logs:
+                 cleanup_folders()
+             # Reset events and queues for new run
+             st.session_state.process_complete.clear()
+             st.session_state.process_error[0] = None
+             # Re-create queues to ensure they are fresh
+             st.session_state.log_queue = queue.Queue()
+             st.session_state.progress_queue = queue.Queue()
+
         def on_video(path):
-            # With parallel processing, videos are saved and will appear in gallery
-            # Gallery is rendered automatically by checking the folder
-            pass  # No action needed - render_gallery checks folder directly
+            pass
 
         config = {
             'api_key': api_key,
@@ -277,40 +280,38 @@ if st.session_state.processing:
         
         if source_type == "File" and local_file:
             os.makedirs("temp", exist_ok=True)
-            temp_path = f"temp/{local_file.name}"
-            # Only write if not exists or similar? Or overwrite.
-            with open(temp_path, "wb") as f:
-                f.write(local_file.getbuffer())
-            config['local_file'] = temp_path
+            # Only save file if not already running to avoid overwriting/locking
+            if st.session_state.worker_thread is None:
+                temp_path = f"temp/{local_file.name}"
+                with open(temp_path, "wb") as f:
+                    f.write(local_file.getbuffer())
+                config['local_file'] = temp_path
+            else:
+                 # Reconstruct path for existing run
+                 config['local_file'] = f"temp/{local_file.name}"
         
-        # Thread-safe queues for callbacks from worker threads
-        log_queue = queue.Queue()
-        progress_queue = queue.Queue()
-        
+        # Callbacks that put data into the session_state queues
         def log_cb(lvl, msg):
-            # Safe to call from worker threads - just adds to queue
-            log_queue.put((lvl, msg))
+            st.session_state.log_queue.put((lvl, msg))
         
         def prog_cb(v, t):
-            # Safe to call from worker threads - just adds to queue
-            progress_queue.put((v, t))
+            st.session_state.progress_queue.put((v, t))
         
         def process_queues():
-            """Process all queued updates in the main thread"""
-            # Process all pending logs
-            while not log_queue.empty():
+            # Process Log Queue
+            while not st.session_state.log_queue.empty():
                 try:
-                    lvl, msg = log_queue.get_nowait()
+                    lvl, msg = st.session_state.log_queue.get_nowait()
                     st.session_state.logs.append((lvl, msg))
                 except queue.Empty:
                     break
             render_logs()
             
-            # Process latest progress update
+            # Process Progress Queue
             latest_progress = None
-            while not progress_queue.empty():
+            while not st.session_state.progress_queue.empty():
                 try:
-                    latest_progress = progress_queue.get_nowait()
+                    latest_progress = st.session_state.progress_queue.get_nowait()
                 except queue.Empty:
                     break
             
@@ -319,51 +320,65 @@ if st.session_state.processing:
                 progress.progress(v)
                 status.text(t)
         
-        processor = VideoProcessor(log_callback=log_cb)
+        # Only start a new thread if one isn't already running
+        if st.session_state.worker_thread is None or not st.session_state.worker_thread.is_alive():
+            # Double check completion event to avoid restarting a finished job if state lingered
+            if not st.session_state.process_complete.is_set():
+                processor = VideoProcessor(log_callback=log_cb)
+                st.session_state.processor = processor # Store for cancellation
+                
+                def process_wrapper():
+                    try:
+                        processor.process_video(config, progress_callback=prog_cb)
+                    except Exception as e:
+                        st.session_state.process_error[0] = e
+                    finally:
+                        st.session_state.process_complete.set()
+                
+                t = threading.Thread(target=process_wrapper, daemon=True)
+                st.session_state.worker_thread = t
+                t.start()
         
-        # Start processing in background thread
-        process_complete = threading.Event()
-        process_error = [None]
-        
-        def process_wrapper():
-            try:
-                processor.process_video(config, progress_callback=prog_cb)
-            except Exception as e:
-                process_error[0] = e
-            finally:
-                process_complete.set()
-        
-        process_thread = threading.Thread(target=process_wrapper, daemon=True)
-        process_thread.start()
-        
-        # Keep UI responsive and process queue updates
         import time
-        while not process_complete.is_set():
-            process_queues()  # Update UI from queue (safe in main thread)
-            render_gallery()  # Update gallery
-            time.sleep(0.5)  # Check twice per second
+        # Monitor Loop
+        # We loop here to update the UI while the thread runs.
+        # Streamlit will re-run the script if user interaction happens, returning us here.
+        # If we just let it fall through, the UI might stale until a re-run.
+        # But `st.timer` or `st.empty` loops are common patterns.
+        # We'll use a loop with sleep but break if thread finishes.
+        
+        while not st.session_state.process_complete.is_set():
+            process_queues()
+            render_gallery()
+            time.sleep(0.5)
+            # Rerun explicitly to keep UI fresh if needed, but sleep prevents busy wait.
+            # However, a hard rerun inside loop resets the script. 
+            # We want to loop and update placeholders.
             
-            # Allow early exit if user stops or refreshes page
-            if not st.session_state.processing:
-                break
+            if not st.session_state.processing: # User cancelled via reset
+                 break
         
-        # Wait for thread to complete with timeout
-        process_thread.join(timeout=2.0)
-        
-        # Final processing
+        # Final update after loop break
         process_queues()
         render_gallery()
         
-        try:
-            if process_error[0]:
-                raise process_error[0]
-            
-            st.balloons()
-            st.success("🎉 All clips finished!")
-        except Exception as e:
-            st.error(f"Error: {e}")
-            import traceback
-            traceback.print_exc()
-        finally:
-            st.session_state.processing = False
-            st.rerun()
+        # Check if done
+        if st.session_state.process_complete.is_set():
+            try:
+                if st.session_state.process_error[0]:
+                    raise st.session_state.process_error[0]
+                
+                # Only show success once
+                if "processing_done" not in st.session_state:
+                     st.balloons()
+                     st.success("🎉 All clips finished!")
+                     st.session_state.processing_done = True # Prevent repeat animations
+            except Exception as e:
+                st.error(f"Error: {e}")
+                import traceback
+                traceback.print_exc()
+            finally:
+                # Optional: Auto-reset processing state after delay or leave it for user to see results
+                # st.session_state.processing = False
+                pass
+

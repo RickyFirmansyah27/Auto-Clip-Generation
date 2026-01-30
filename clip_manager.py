@@ -4,13 +4,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 class ClipTaskManager:
     """Manages parallel video clip processing using thread pool"""
     
-    def __init__(self, max_workers=4, log_callback=None, progress_callback=None, video_callback=None):
+    def __init__(self, max_workers=2, log_callback=None, progress_callback=None, video_callback=None):
         self.max_workers = max_workers
         self.log_callback = log_callback
         self.progress_callback = progress_callback
         self.video_callback = video_callback
         self.cancel_flag = threading.Event()
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.completed_count = 0
     
     def _safe_log(self, level, message):
@@ -28,8 +28,6 @@ class ClipTaskManager:
     def _safe_video_callback(self, path):
         """Thread-safe video callback - just notify, don't render"""
         if self.video_callback:
-            # Just call the callback with the path
-            # No locks needed since we're not doing Streamlit operations
             self.video_callback(path)
     
     def _update_overall_progress(self, total_clips):
@@ -48,7 +46,6 @@ class ClipTaskManager:
         self._safe_log("INFO", f"[Thread {clip_index+1}] Starting: {clip_name}")
         
         try:
-            # Process the clip
             processor.process_single_clip(
                 source_path,
                 float(clip_data['start']),
@@ -61,13 +58,12 @@ class ClipTaskManager:
                 video_callback=self._safe_video_callback
             )
             
-            # Update overall progress
             self._update_overall_progress(total_clips)
             self._safe_log("SUCCESS", f"[Thread {clip_index+1}] Finished: {clip_name}")
             
         except Exception as e:
             self._safe_log("ERROR", f"[Thread {clip_index+1}] Failed {clip_name}: {str(e)[:60]}")
-            self._update_overall_progress(total_clips)  # Still update progress even on failure
+            self._update_overall_progress(total_clips)
     
     def process_clips_parallel(self, processor, clips_data, source_path, all_words, 
                                config, temp_dir, output_dir):
@@ -79,7 +75,6 @@ class ClipTaskManager:
         self._safe_progress(0.5, f"🎬 Processing {total_clips} clips in parallel...")
         
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            # Submit all clip processing tasks
             futures = {}
             
             for i, data in enumerate(clips_data):
@@ -90,17 +85,14 @@ class ClipTaskManager:
                 )
                 futures[future] = i
             
-            # Wait for all tasks to complete or cancellation
             for future in as_completed(futures):
                 if self.cancel_flag.is_set():
                     self._safe_log("WARNING", "Cancellation requested, stopping remaining clips...")
-                    # Cancel remaining futures
                     for f in futures:
                         f.cancel()
                     executor.shutdown(wait=False, cancel_futures=True)
                     break
                 
-                # Get result to catch any exceptions
                 try:
                     future.result()
                 except Exception as e:
