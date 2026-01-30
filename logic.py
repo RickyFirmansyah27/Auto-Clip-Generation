@@ -6,14 +6,17 @@ import yt_dlp
 import torch
 import shutil
 import threading
+import subprocess
 from groq import Groq
 from moviepy.editor import VideoFileClip, CompositeVideoClip, TextClip
 from moviepy.config import change_settings
 
+import config as cfg
+
 _model_download_lock = threading.Lock()
 _mediapipe_model_path = None
 
-change_settings({"IMAGEMAGICK_BINARY": r"C:\Program Files\ImageMagick-7.1.2-Q16-HDRI\magick.exe"})
+change_settings({"IMAGEMAGICK_BINARY": cfg.IMAGEMAGICK_PATH})
 
 class VideoProcessor:
     def __init__(self, log_callback=None):
@@ -35,13 +38,11 @@ class VideoProcessor:
 
     def process_video(self, config, progress_callback=None):
         """Main processing logic"""
-        temp_dir = "temp"
+        temp_dir = cfg.TEMP_DIR
         output_dir = config['output_dir']
 
-        if not os.path.exists(temp_dir):
-            os.makedirs(temp_dir)
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
+        os.makedirs(temp_dir, exist_ok=True)
+        os.makedirs(output_dir, exist_ok=True)
 
         try:
             source_path = None
@@ -115,7 +116,7 @@ class VideoProcessor:
             from clip_manager import ClipTaskManager
             
             total_clips = len(clips_data)
-            max_workers = min(6, total_clips)
+            max_workers = min(cfg.MAX_WORKERS, total_clips)
             
             if progress_callback: progress_callback(0.5, f"🎬 Processing {total_clips} clips in parallel...")
             self.log("INFO", f"🚀 Starting parallel processing: {total_clips} clips with {max_workers} worker(s)")
@@ -198,7 +199,7 @@ class VideoProcessor:
     def transcribe_audio(self, audio_path, api_key):    
         file_size_mb = os.path.getsize(audio_path) / (1024 * 1024)  
         try:
-            if file_size_mb > 20:
+            if file_size_mb > cfg.AUDIO_MAX_SIZE_MB:
                 self.log("INFO", f"Audio file is {file_size_mb:.1f}MB, preprocessing to reduce size...")
                 audio_path = self._preprocess_audio(audio_path)
                 new_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
@@ -210,9 +211,9 @@ class VideoProcessor:
             with open(audio_path, "rb") as audio_file:
                 transcription = client.audio.transcriptions.create(
                     file=(audio_path, audio_file.read()),
-                    model="whisper-large-v3",
+                    model=cfg.WHISPER_MODEL,
                     response_format="verbose_json",
-                    language="id",
+                    language=cfg.WHISPER_LANGUAGE,
                     timestamp_granularities=["word"]
                 )
             
@@ -464,11 +465,10 @@ class VideoProcessor:
                 
                 with _model_download_lock:
                     if _mediapipe_model_path is None or not os.path.exists(_mediapipe_model_path):
-                        model_path = os.path.join(temp_dir, "blaze_face_short_range.tflite")
+                        model_path = os.path.join(temp_dir, cfg.MEDIAPIPE_MODEL_NAME)
                         if not os.path.exists(model_path):
                             self.log("INFO", "Downloading MediaPipe face detection model...")
-                            model_url = "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite"
-                            urllib.request.urlretrieve(model_url, model_path)
+                            urllib.request.urlretrieve(cfg.MEDIAPIPE_MODEL_URL, model_path)
                             self.log("SUCCESS", "Model downloaded!")
                         _mediapipe_model_path = model_path
                 
@@ -489,7 +489,7 @@ class VideoProcessor:
                 
                 options = vision.FaceDetectorOptions(
                     base_options=base_options,
-                    min_detection_confidence=0.5
+                    min_detection_confidence=cfg.FACE_DETECTION_CONFIDENCE
                 )
                 
                 with vision.FaceDetector.create_from_options(options) as face_detector:
@@ -500,12 +500,6 @@ class VideoProcessor:
                     face_found_count = 0
                     frames_to_process = end_frame - start_frame
                     no_face_count = 0
-                    
-                    ema_alpha = 0.18
-                    max_jump_ratio = 0.02
-                    SKIP_FRAMES = 3
-                    CENTER_PULL_STRENGTH = 0.005
-                    MIN_FACE_AREA_RATIO = 0.01
 
                     while frame_idx < frames_to_process:
                         ret, frame = cap.read()
@@ -514,7 +508,7 @@ class VideoProcessor:
 
                         face_detected_this_frame = False
                         
-                        if frame_idx % SKIP_FRAMES == 0:
+                        if frame_idx % cfg.FACE_SKIP_FRAMES == 0:
                             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
                             detection_result = face_detector.detect(mp_image)
@@ -522,7 +516,7 @@ class VideoProcessor:
                             if detection_result.detections:
                                 best_detection = None
                                 max_area = 0
-                                min_area = width * height * MIN_FACE_AREA_RATIO
+                                min_area = width * height * cfg.FACE_MIN_AREA_RATIO
                                 
                                 for detection in detection_result.detections:
                                     bbox = detection.bounding_box
@@ -534,14 +528,14 @@ class VideoProcessor:
                                 if best_detection:
                                     raw_center_x = best_detection.origin_x + best_detection.width // 2
                                     
-                                    max_jump = width * max_jump_ratio
+                                    max_jump = width * cfg.FACE_MAX_JUMP_RATIO
                                     diff = raw_center_x - last_x_c
                                     if abs(diff) > max_jump:
                                         target_x = last_x_c + (max_jump if diff > 0 else -max_jump)
                                     else:
                                         target_x = raw_center_x
                                     
-                                    smoothed_x = ema_alpha * target_x + (1 - ema_alpha) * smoothed_x
+                                    smoothed_x = cfg.FACE_EMA_ALPHA * target_x + (1 - cfg.FACE_EMA_ALPHA) * smoothed_x
                                     last_x_c = int(smoothed_x)
                                     face_found_count += 1
                                     face_detected_this_frame = True
@@ -549,8 +543,8 @@ class VideoProcessor:
                         
                         if not face_detected_this_frame:
                             no_face_count += 1
-                            if no_face_count > 10:
-                                pull_to_center = (center_x_default - smoothed_x) * CENTER_PULL_STRENGTH
+                            if no_face_count > cfg.FACE_NO_DETECT_THRESHOLD:
+                                pull_to_center = (center_x_default - smoothed_x) * cfg.FACE_CENTER_PULL_STRENGTH
                                 smoothed_x += pull_to_center
                                 last_x_c = int(smoothed_x)
                         
@@ -558,7 +552,7 @@ class VideoProcessor:
                         frame_idx += 1
 
                 total_tracked = len(centers)
-                detection_rate = (face_found_count / (total_tracked / SKIP_FRAMES)) * 100 if total_tracked > 0 else 0
+                detection_rate = (face_found_count / (total_tracked / cfg.FACE_SKIP_FRAMES)) * 100 if total_tracked > 0 else 0
                 self.log("INFO", f"Face tracking: {total_tracked} frames, {face_found_count} detections ({detection_rate:.0f}%)")
 
             except ImportError:
@@ -577,7 +571,7 @@ class VideoProcessor:
                 centers = [width//2]
 
             from scipy.ndimage import gaussian_filter1d
-            sigma = min(90, len(centers) // 4) if len(centers) > 30 else 10
+            sigma = min(cfg.GAUSSIAN_SIGMA_MAX, len(centers) // 4) if len(centers) > 30 else cfg.GAUSSIAN_SIGMA_MIN
             centers = gaussian_filter1d(centers, sigma=sigma)
 
             def crop_fn(get_frame, t):
@@ -597,25 +591,21 @@ class VideoProcessor:
                 end_t = full_clip.duration
             clip = full_clip.subclip(start_t, end_t)
             
-            final_clip = clip.fl(crop_fn, apply_to=['mask']).resize((1080, 1920))
+            final_clip = clip.fl(crop_fn, apply_to=['mask']).resize((cfg.OUTPUT_WIDTH, cfg.OUTPUT_HEIGHT))
             
             safe_name = "".join([c for c in clip_name if c.isalnum() or c == '_'])
             output_filename = f"{output_dir}/{safe_name}.mp4"
             temp_video_noSub = f"{temp_dir}/temp_nosub_{safe_name}.mp4"
             
-            app_env = os.getenv("APP_ENV", "production").lower()
-            use_gpu_encode = app_env == "local"
-            encode_preset = 'fast' if use_gpu_encode else 'ultrafast'
-            
             final_clip.write_videofile(
                 temp_video_noSub,
-                codec='libx264',
+                codec=cfg.CPU_VIDEO_CODEC,
                 audio_codec='aac',
-                fps=30,
-                preset=encode_preset,
+                fps=cfg.OUTPUT_FPS,
+                preset=cfg.get_encode_preset(),
                 threads=4,
                 logger=None,
-                bitrate='8M'
+                bitrate=cfg.VIDEO_BITRATE
             )
             
             full_clip.close()
@@ -689,16 +679,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 
                 self.log("INFO", "Burning subtitles with FFmpeg...")
                 
-                import subprocess
+                video_codec = cfg.get_video_codec()
+                preset = cfg.get_ffmpeg_preset()
                 
-                # Check environment for hardware acceleration
-                app_env = os.getenv("APP_ENV", "production").lower()
-                use_gpu = app_env == "local"
-                
-                video_codec = 'h264_nvenc' if use_gpu else 'libx264'
-                preset = 'p4' if use_gpu else 'slow' # p4 is medium preset for nvenc
-                
-                if use_gpu:
+                if cfg.is_gpu_enabled():
                      self.log("INFO", f"🚀 Using GPU encoding ({video_codec})")
                 else:
                      self.log("INFO", f"Using CPU encoding ({video_codec})")
@@ -709,14 +693,14 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     '-vf', f"ass='{ass_path.replace(chr(92), '/')}'",
                     '-c:v', video_codec,
                     '-preset', preset,
-                    '-b:v', '8M',
-                    '-maxrate', '10M',
-                    '-bufsize', '16M',
+                    '-b:v', cfg.VIDEO_BITRATE,
+                    '-maxrate', cfg.VIDEO_BITRATE_MAX,
+                    '-bufsize', cfg.VIDEO_BUFSIZE,
                     '-profile:v', 'high',
                     '-level', '4.2',
                     '-pix_fmt', 'yuv420p',
                     '-c:a', 'aac',
-                    '-b:a', '256k',
+                    '-b:a', cfg.AUDIO_BITRATE,
                     '-movflags', '+faststart',
                     output_filename
                 ]

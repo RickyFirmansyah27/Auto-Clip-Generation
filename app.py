@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import config as cfg
 from logic import VideoProcessor
 
 def signal_handler(sig, frame):
@@ -23,13 +24,13 @@ except ValueError:
     pass
 
 def cleanup_folders():
-    for folder in ['temp', 'hasil_shorts']:
+    for folder in [cfg.TEMP_DIR, cfg.OUTPUT_DIR]:
         if os.path.exists(folder):
             try:
                 shutil.rmtree(folder)
             except:
                 pass
-    os.makedirs('hasil_shorts', exist_ok=True)
+    os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
 
 st.set_page_config(page_title="ClipGenAI", page_icon="✂️", layout="wide")
 
@@ -132,12 +133,11 @@ with left:
     with st.expander("🎨 Subtitles"):
         enable_subs = st.checkbox("Enable", value=True)
         if enable_subs:
-            font_dir = "fonts"
-            if not os.path.exists(font_dir):
-                os.makedirs(font_dir)
+            font_dir = cfg.FONT_DIR
+            os.makedirs(font_dir, exist_ok=True)
             
             local_fonts = [f for f in os.listdir(font_dir) if f.lower().endswith(('.ttf', '.otf'))]
-            default_fonts = ["Impact", "Arial", "Verdana", "Comic Sans MS"]
+            default_fonts = [cfg.DEFAULT_FONT, "Arial", "Verdana", "Comic Sans MS"]
             available_fonts = local_fonts + default_fonts
             
             default_idx = 0
@@ -149,18 +149,22 @@ with left:
             c1, c2 = st.columns(2)
             with c1:
                 font_name = st.selectbox("Font", available_fonts, index=default_idx)
-                font_size = st.slider("Size", 40, 120, 70)
+                font_size = st.slider("Size", 40, 120, cfg.DEFAULT_FONT_SIZE)
             with c2:
-                font_color = st.color_picker("Color", "#FFFF00")
-                stroke_color = st.color_picker("Outline", "#000000")
-            stroke_width = st.slider("Outline", 1, 6, 4)
-            text_pos = st.slider("Position", 0.6, 0.85, 0.75)
+                font_color = st.color_picker("Color", cfg.DEFAULT_FONT_COLOR)
+                stroke_color = st.color_picker("Outline", cfg.DEFAULT_STROKE_COLOR)
+            stroke_width = st.slider("Outline", 1, 6, cfg.DEFAULT_STROKE_WIDTH)
+            text_pos = st.slider("Position", 0.6, 0.85, cfg.DEFAULT_TEXT_POSITION)
             
             if font_name in local_fonts:
                 font_name = os.path.join(font_dir, font_name)
         else:
-            font_name, font_size, font_color = "Impact", 70, "#FFFF00"
-            stroke_color, stroke_width, text_pos = "#000000", 4, 0.75
+            font_name = cfg.DEFAULT_FONT
+            font_size = cfg.DEFAULT_FONT_SIZE
+            font_color = cfg.DEFAULT_FONT_COLOR
+            stroke_color = cfg.DEFAULT_STROKE_COLOR
+            stroke_width = cfg.DEFAULT_STROKE_WIDTH
+            text_pos = cfg.DEFAULT_TEXT_POSITION
     
     st.markdown("---")
     
@@ -187,14 +191,14 @@ with left:
             st.session_state.logs = []
             st.session_state.completed_videos = []
             
-            for folder in ['temp']:
+            for folder in [cfg.TEMP_DIR]:
                 if os.path.exists(folder):
                     try:
                         shutil.rmtree(folder)
                     except:
                         pass
-            os.makedirs('temp', exist_ok=True)
-            os.makedirs('hasil_shorts', exist_ok=True)
+            os.makedirs(cfg.TEMP_DIR, exist_ok=True)
+            os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
             
             gc.collect()
             
@@ -237,13 +241,13 @@ with left:
             if 'processing_done' in st.session_state:
                 del st.session_state.processing_done
             
-            for folder in ['temp', 'hasil_shorts']:
+            for folder in [cfg.TEMP_DIR, cfg.OUTPUT_DIR]:
                 if os.path.exists(folder):
                     try:
                         shutil.rmtree(folder)
                     except Exception as e:
                         print(f"Error cleaning {folder}: {e}")
-            os.makedirs('hasil_shorts', exist_ok=True)
+            os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
             
             gc.collect()
 
