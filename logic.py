@@ -1,0 +1,692 @@
+import os
+import json
+import cv2
+import numpy as np
+import yt_dlp
+import torch
+import shutil
+from groq import Groq
+from moviepy.editor import VideoFileClip, CompositeVideoClip, TextClip
+from moviepy.config import change_settings
+
+# Configure ImageMagick
+change_settings({"IMAGEMAGICK_BINARY": r"C:\Program Files\ImageMagick-7.1.2-Q16-HDRI\magick.exe"})
+
+class VideoProcessor:
+    def __init__(self, log_callback=None):
+        self.log_callback = log_callback
+        self.cancel_flag = False
+        self.task_manager = None  # Will be set during parallel processing
+
+    def log(self, level, message):
+        if self.log_callback:
+            self.log_callback(level, message)
+        else:
+            print(f"[{level}] {message}")
+
+    def stop_processing(self):
+        self.cancel_flag = True
+        self.log("WARNING", "Stop signal received...")
+        # Also cancel the task manager if it exists
+        if self.task_manager:
+            self.task_manager.cancel()
+
+    def process_video(self, config, progress_callback=None):
+        """Main processing logic"""
+        temp_dir = "temp"
+        output_dir = config['output_dir']
+
+        # Create directories
+        if not os.path.exists(temp_dir):
+            os.makedirs(temp_dir)
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
+        try:
+            # 1. Get Source Video
+            source_path = None
+            
+            if config['source_type'] == 'youtube':
+                if progress_callback: progress_callback(0.1, "📥 Downloading video...")
+                self.log("INFO", f"Downloading: {config['youtube_url']}")
+
+                source_path = self.download_video(config['youtube_url'], temp_dir)
+                if not source_path or self.cancel_flag:
+                    if self.cancel_flag:
+                        self.log("WARNING", "Cancelled by user")
+                    return
+            else:
+                if progress_callback: progress_callback(0.1, "📂 Loading local file...")
+                self.log("INFO", f"Using local file: {config['local_file']}")
+
+                source_path = f"{temp_dir}/source_video.mp4"
+                shutil.copy2(config['local_file'], source_path)
+                self.log("SUCCESS", "Local file loaded!")
+
+            self.log("SUCCESS", "Video source ready!")
+
+            # 2. Extract Audio
+            if progress_callback: progress_callback(0.2, "🎵 Extracting audio...")
+            self.log("INFO", "Extracting audio for transcription...")
+
+            video = VideoFileClip(source_path)
+            video_duration = video.duration
+            audio_path = f"{temp_dir}/source_audio.wav"
+
+            if video.audio is None:
+                self.log("ERROR", "Video has no audio track!")
+                video.close()
+                return
+
+            video.audio.write_audiofile(audio_path, verbose=False, logger=None)
+            video.close()
+
+            if self.cancel_flag: return
+
+            # 3. Transcribe with Groq Whisper API (fastest!) or faster-whisper
+            if progress_callback: progress_callback(0.3, "🎤 Transcribing audio...")
+            
+            whisper_result = self.transcribe_audio(audio_path, config['api_key'])
+            
+            if not whisper_result:
+                self.log("ERROR", "Transcription failed!")
+                return
+
+            full_text = ""
+            for seg in whisper_result['segments']:
+                full_text += f"[{seg['start']:.1f}] {seg['text']}\n"
+            all_words = [w for seg in whisper_result['segments'] for w in seg['words']]
+
+            self.log("SUCCESS", f"Transcription complete! {len(all_words)} words detected")
+
+            if self.cancel_flag: return
+
+            # 4. Analyze with AI
+            if progress_callback: progress_callback(0.4, "🤖 AI analyzing hooks...")
+            self.log("INFO", f"Sending to Groq AI for analysis...")
+
+            clips_data = self.analyze_hooks_with_groq(config['api_key'], full_text, config['clip_count'])
+
+            if not clips_data:
+                self.log("ERROR", "AI could not find any clips!")
+                return
+
+            self.log("SUCCESS", f"Found {len(clips_data)} viral segments!")
+
+            if self.cancel_flag: return
+
+            # 5. Process clips in parallel
+            from clip_manager import ClipTaskManager
+            
+            total_clips = len(clips_data)
+            max_workers = min(4, total_clips)  # Use up to 4 threads
+            
+            if progress_callback: progress_callback(0.5, f"🎬 Processing {total_clips} clips in parallel...")
+            self.log("INFO", f"🚀 Starting parallel processing: {total_clips} clips with {max_workers} worker(s)")
+            
+            # Create task manager for parallel execution
+            self.task_manager = ClipTaskManager(
+                max_workers=max_workers,
+                log_callback=self.log_callback,
+                progress_callback=progress_callback,
+                video_callback=config.get('video_callback')
+            )
+            
+            # Process all clips in parallel
+            completed = self.task_manager.process_clips_parallel(
+                processor=self,
+                clips_data=clips_data,
+                source_path=source_path,
+                all_words=all_words,
+                config=config,
+                temp_dir=temp_dir,
+                output_dir=output_dir
+            )
+
+            if self.cancel_flag or self.task_manager.cancel_flag.is_set():
+                self.log("WARNING", "Processing cancelled by user")
+            else:
+                self.log("SUCCESS", f"🎉 All done! Completed {completed}/{total_clips} clips")
+                if progress_callback: progress_callback(1.0, "✅ Complete!")
+            
+            # Clear the task manager reference after processing
+            self.task_manager = None
+
+        except Exception as e:
+            self.log("ERROR", f"Error: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    def download_video(self, url, temp_dir):
+        """Download YouTube video"""
+        output_path = f"{temp_dir}/source_video.mp4"
+        if os.path.exists(output_path):
+            os.remove(output_path)
+
+        ydl_opts = {
+            # Download BEST quality available (no resolution limit)
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best',
+            'outtmpl': f"{temp_dir}/raw_video.%(ext)s",
+            'merge_output_format': 'mp4',
+            'quiet': True,
+            'no_warnings': True,
+            'socket_timeout': 30,
+            'retries': 5,
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'web'],
+                    'player_skip': ['web_creator', 'tv_embedded']
+                }
+            },
+            'nocheckcertificate': True,
+            'postprocessors': [{
+                'key': 'FFmpegVideoConvertor',
+                'preferedformat': 'mp4',
+            }],
+        }
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+
+            for file in os.listdir(temp_dir):
+                if file.startswith("raw_video"):
+                    src = os.path.join(temp_dir, file)
+                    if file.endswith(".mp4"):
+                        shutil.move(src, output_path)
+                        return output_path
+                    elif os.path.exists(src):
+                        shutil.move(src, output_path)
+                        return output_path
+            return None
+        except Exception as e:
+            self.log("ERROR", f"Download failed: {str(e)}")
+            return None
+
+    def transcribe_audio(self, audio_path, api_key):    
+        file_size_mb = os.path.getsize(audio_path) / (1024 * 1024)  
+        try:
+            if file_size_mb > 20:
+                self.log("INFO", f"Audio file is {file_size_mb:.1f}MB, preprocessing to reduce size...")
+                audio_path = self._preprocess_audio(audio_path)
+                new_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
+                self.log("SUCCESS", f"Preprocessed: {file_size_mb:.1f}MB → {new_size_mb:.1f}MB")
+            
+            self.log("INFO", "🚀 Attempting Groq Whisper API (ultra-fast)...")
+            client = Groq(api_key=api_key)
+            
+            with open(audio_path, "rb") as audio_file:
+                transcription = client.audio.transcriptions.create(
+                    file=(audio_path, audio_file.read()),
+                    model="whisper-large-v3",
+                    response_format="verbose_json",
+                    language="id",
+                    timestamp_granularities=["word"]
+                )
+            
+            
+            # Convert Groq response to our format
+            # Handle both dict and object response formats
+            words_list = None
+            if isinstance(transcription, dict):
+                words_list = transcription.get('words', [])
+            elif hasattr(transcription, 'words'):
+                words_list = transcription.words
+            
+            if words_list:
+                segments = []
+                current_segment = {"start": 0, "end": 0, "text": "", "words": []}
+                
+                for word in words_list:
+                    # Handle both dict and object word formats
+                    if isinstance(word, dict):
+                        word_data = {
+                            "word": word.get('word', ''),
+                            "start": word.get('start', 0),
+                            "end": word.get('end', 0)
+                        }
+                    else:
+                        word_data = {
+                            "word": word.word,
+                            "start": word.start,
+                            "end": word.end
+                        }
+                    
+                    current_segment["words"].append(word_data)
+                    current_segment["text"] += word_data["word"] + " "
+                    
+                    # Create segments every ~10 words or at punctuation
+                    if len(current_segment["words"]) >= 10 or word_data["word"].strip().endswith(('.', '?', '!')):
+                        current_segment["start"] = current_segment["words"][0]["start"]
+                        current_segment["end"] = current_segment["words"][-1]["end"]
+                        segments.append(current_segment)
+                        current_segment = {"start": 0, "end": 0, "text": "", "words": []}
+                
+                # Add last segment
+                if current_segment["words"]:
+                    current_segment["start"] = current_segment["words"][0]["start"]
+                    current_segment["end"] = current_segment["words"][-1]["end"]
+                    segments.append(current_segment)
+                
+                total_words = sum(len(s["words"]) for s in segments)
+                self.log("SUCCESS", f"✅ Groq Whisper API: {total_words} words in {len(segments)} segments")
+                return {"segments": segments}
+            else:
+                raise Exception("No words in Groq response")
+                
+        except Exception as e:
+            self.log("WARNING", f"Groq Whisper API failed: {str(e)[:100]}")
+            self.log("INFO", "Falling back to faster-whisper...")
+        
+        # Method 2: faster-whisper (3-4x faster than standard whisper)
+        try:
+            from faster_whisper import WhisperModel
+            
+            # Detect GPU/CPU with fallback
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            compute_type = "float16" if device == "cuda" else "int8"
+            
+            self.log("INFO", f"⚡ Using faster-whisper on {device.upper()} ({compute_type})")
+            
+            model = WhisperModel("base", device=device, compute_type=compute_type)
+            segments_iter, info = model.transcribe(
+                audio_path,
+                language="id",
+                word_timestamps=True,
+                vad_filter=True  # Voice Activity Detection for better accuracy
+            )
+            
+            # Convert to our format
+            segments = []
+            for segment in segments_iter:
+                words = []
+                for word in segment.words:
+                    words.append({
+                        "word": word.word,
+                        "start": word.start,
+                        "end": word.end
+                    })
+                
+                segments.append({
+                    "start": segment.start,
+                    "end": segment.end,
+                    "text": segment.text,
+                    "words": words
+                })
+            
+            total_words = sum(len(s["words"]) for s in segments)
+            self.log("SUCCESS", f"✅ faster-whisper: {total_words} words in {len(segments)} segments")
+            return {"segments": segments}
+            
+        except ImportError:
+            self.log("WARNING", "faster-whisper not installed, falling back to standard whisper")
+        except Exception as e:
+            self.log("WARNING", f"faster-whisper failed: {str(e)[:60]}")
+        
+        # Method 3: Standard whisper (slowest, last resort)
+        try:
+            import whisper
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            self.log("INFO", f"🐌 Using standard Whisper on {device.upper()} (this may take a while)...")
+            
+            model = whisper.load_model("base", device=device)
+            result = model.transcribe(audio_path, language='id', task='transcribe', fp16=False, word_timestamps=True)
+            
+            total_words = sum(len(s.get("words", [])) for s in result["segments"])
+            self.log("SUCCESS", f"✅ Standard Whisper: {total_words} words")
+            return result
+            
+        except Exception as e:
+            self.log("ERROR", f"All transcription methods failed: {str(e)}")
+            return None
+    
+    def _preprocess_audio(self, audio_path):
+        """Preprocess audio to reduce file size (downsample to 16kHz mono FLAC)"""
+        import subprocess
+        
+        # Create preprocessed file path
+        temp_dir = os.path.dirname(audio_path)
+        preprocessed_path = os.path.join(temp_dir, "preprocessed_audio.flac")
+        
+        # Remove old preprocessed file if exists
+        if os.path.exists(preprocessed_path):
+            os.remove(preprocessed_path)
+        
+        # Use FFmpeg to downsample to 16kHz mono FLAC (Groq's recommended format)
+        # This typically reduces file size by 70-80% without quality loss for speech
+        ffmpeg_cmd = [
+            'ffmpeg', '-y',
+            '-i', audio_path,
+            '-ar', '16000',      # Downsample to 16kHz (optimal for speech)
+            '-ac', '1',          # Convert to mono
+            '-map', '0:a',       # Map only audio
+            '-c:a', 'flac',      # FLAC codec (lossless compression)
+            preprocessed_path
+        ]
+        
+        try:
+            result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=120)
+            
+            if result.returncode == 0 and os.path.exists(preprocessed_path):
+                return preprocessed_path
+            else:
+                self.log("WARNING", "Audio preprocessing failed, using original file")
+                return audio_path
+                
+        except Exception as e:
+            self.log("WARNING", f"Audio preprocessing error: {str(e)[:60]}")
+            return audio_path
+
+
+    def analyze_hooks_with_groq(self, api_key, transcript_text, num_clips):
+        """Analyze transcript with Groq AI"""
+        client = Groq(api_key=api_key)
+        safe_text = transcript_text[:25000]
+
+        prompt = f"""
+        You are a professional Video Editor. Analyze this transcript.
+        Find exactly {num_clips} viral segments for TikTok/YouTube Shorts.
+
+        STRICT DURATION RULES:
+        - MINIMUM duration: 30 seconds
+        - MAXIMUM duration: 60 seconds
+        - Each clip MUST be between 40-120 seconds
+        - Do NOT create clips shorter than 40 seconds
+
+        CRITERIA:
+        1. Must have a strong hook in the first 5 seconds.
+        2. Must be self-contained context.
+        3. Each segment duration = end - start must be >= 30 and <= 60 seconds.
+
+        TRANSCRIPT:
+        {safe_text} ... (truncated)
+
+        OUTPUT STRICT JSON ONLY (ensure end - start is between 30 and 60 for each):
+        [
+          {{ "start": 120.0, "end": 165.0, "title": "Klip_1" }},
+          {{ "start": 300.5, "end": 350.0, "title": "Klip_2" }}
+        ]
+        """
+
+        try:
+            chat_completion = client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant that outputs only valid JSON. Each clip MUST be 30-60 seconds long."},
+                    {"role": "user", "content": prompt}
+                ],
+                model="openai/gpt-oss-20b",
+                temperature=0.6,
+                response_format={"type": "json_object"},
+            )
+            result_content = chat_completion.choices[0].message.content
+            data = json.loads(result_content)
+
+            clips = []
+            if isinstance(data, list):
+                clips = data
+            elif isinstance(data, dict):
+                for k, v in data.items():
+                    if isinstance(v, list):
+                        clips = v
+                        break
+
+            # Validate and filter clips
+            valid_clips = []
+            for clip in clips:
+                try:
+                    start = float(clip.get('start', 0))
+                    end = float(clip.get('end', 0))
+                    duration = end - start
+
+                    if duration < 30:
+                        self.log("WARNING", f"Clip '{clip.get('title', 'Unknown')}' too short ({duration:.1f}s), extending to 30s")
+                        clip['end'] = start + 30
+                    elif duration > 60:
+                        self.log("WARNING", f"Clip '{clip.get('title', 'Unknown')}' too long ({duration:.1f}s), trimming to 60s")
+                        clip['end'] = start + 60
+
+                    valid_clips.append(clip)
+                except:
+                    continue
+
+            return valid_clips
+        except Exception as e:
+            self.log("ERROR", f"Groq API Error: {str(e)}")
+            return []
+
+    def process_single_clip(self, source_video, start_t, end_t, clip_name, segment_words, config, temp_dir, output_dir, video_callback=None):
+        """Process a single clip with face tracking and subtitles"""
+        try:
+            # Sanitize clip name - only allow alphanumeric and underscore
+            safe_clip_name = ''.join(c if c.isalnum() else '_' for c in clip_name)[:50]
+            
+            full_clip = VideoFileClip(source_video)
+            if end_t > full_clip.duration:
+                end_t = full_clip.duration
+            clip = full_clip.subclip(start_t, end_t)
+
+            # Save temp file for face detection
+            temp_sub = f"{temp_dir}/temp_{safe_clip_name}.mp4"
+            clip.write_videofile(temp_sub, codec='libx264', audio_codec='aac', logger=None)
+
+            # Face tracking with OpenCV Haar Cascade (more reliable)
+            cap = cv2.VideoCapture(temp_sub)
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+            centers = []
+
+            try:
+                face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+                
+                frame_idx = 0
+                last_x_c = width // 2
+                face_found_count = 0
+
+                while True:
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+
+                    # Process every 3rd frame for speed
+                    if frame_idx % 3 == 0:
+                        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                        
+                        faces = face_cascade.detectMultiScale(
+                            gray,
+                            scaleFactor=1.1,
+                            minNeighbors=5,
+                            minSize=(50, 50)
+                        )
+                        
+                        if len(faces) > 0:
+                            # Get largest face
+                            largest = max(faces, key=lambda f: f[2] * f[3])
+                            x, y, w, h = largest
+                            center_x = x + w // 2
+                            
+                            # Smooth transition
+                            max_jump = width * 0.08
+                            diff = center_x - last_x_c
+                            if abs(diff) > max_jump:
+                                center_x = int(last_x_c + (max_jump if diff > 0 else -max_jump))
+                            
+                            last_x_c = center_x
+                            face_found_count += 1
+                    
+                    centers.append(last_x_c)
+                    frame_idx += 1
+
+                self.log("INFO", f"Face tracking: {len(centers)} frames, {face_found_count} detections")
+
+            except Exception as e:
+                self.log("WARNING", f"Face tracking failed: {str(e)[:40]}")
+                cap.release()
+                cap = cv2.VideoCapture(temp_sub)
+                frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                centers = [width // 2] * max(1, frame_count)
+
+            cap.release()
+
+            if not centers:
+                centers = [width//2]
+
+            window = 30
+            if len(centers) > window:
+                centers = np.convolve(centers, np.ones(window)/window, mode='same')
+
+            def crop_fn(get_frame, t):
+                idx = int(t * fps)
+                safe_idx = min(idx, len(centers)-1)
+                cx = centers[safe_idx]
+                img = get_frame(t)
+                h, w = img.shape[:2]
+                target_width = int(h * 9/16)
+                target_width = target_width - (target_width % 2)
+                x1 = int(cx - target_width/2)
+                x1 = max(0, min(w - target_width, x1))
+                return img[:, x1:x1+target_width]
+
+            # Resize to vertical format and save temp video
+            final_clip = clip.fl(crop_fn, apply_to=['mask']).resize((1080, 1920))
+            
+            safe_name = "".join([c for c in clip_name if c.isalnum() or c == '_'])
+            output_filename = f"{output_dir}/{safe_name}.mp4"
+            temp_video_noSub = f"{temp_dir}/temp_nosub_{safe_name}.mp4"
+            
+            # Export video without subtitles (HIGH QUALITY)
+            final_clip.write_videofile(
+                temp_video_noSub,
+                codec='libx264',
+                audio_codec='aac',
+                fps=30,
+                preset='medium',
+                threads=4,
+                logger=None,
+                bitrate='10M'  # High bitrate for sharp video
+            )
+            
+            full_clip.close()
+            final_clip.close()
+
+            # Generate ASS subtitle file for FFmpeg
+            if config.get('enable_subtitle', True):
+                valid_words = [w for w in segment_words if w['start'] >= start_t and w['end'] <= end_t]
+                self.log("INFO", f"Creating ASS subtitles: {len(valid_words)} words")
+                
+                ass_path = f"{temp_dir}/subs_{safe_name}.ass"
+                
+                # Font settings
+                font_name = config.get('font_name', 'Impact')
+                font_size = config['font_size']
+                stroke_width = config['stroke_width']
+                
+                # Convert colors from #RRGGBB to ASS format &HBBGGRR&
+                def hex_to_ass(hex_color):
+                    hex_color = hex_color.lstrip('#')
+                    r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
+                    return f"&H00{b:02X}{g:02X}{r:02X}"
+                
+                primary_color = hex_to_ass(config['font_color'])
+                secondary_color = hex_to_ass(config['font_color_alt'])
+                outline_color = hex_to_ass(config['stroke_color'])
+                
+                # Calculate Y position (ASS uses pixels from top)
+                margin_v = int(1920 * (1 - config['text_position']))
+                
+                # ASS header with professional styling
+                ass_content = f"""[Script Info]
+Title: Kliperr Subtitles
+ScriptType: v4.00+
+PlayResX: 1080
+PlayResY: 1920
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Highlight,{font_name},{font_size},{primary_color},&H000000FF,{outline_color},&H80000000,1,0,0,0,100,100,0,0,1,{stroke_width},3,2,50,50,{margin_v},1
+Style: Normal,{font_name},{font_size},{secondary_color},&H000000FF,{outline_color},&H80000000,1,0,0,0,100,100,0,0,1,{stroke_width},3,2,50,50,{margin_v},1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+                
+                def time_to_ass(seconds):
+                    seconds = max(0, seconds - start_t)
+                    h = int(seconds // 3600)
+                    m = int((seconds % 3600) // 60)
+                    s = int(seconds % 60)
+                    cs = int((seconds % 1) * 100)
+                    return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+                
+                for w in valid_words:
+                    try:
+                        raw_text = w.get('word', w.get('text', '')).strip()
+                        if not raw_text:
+                            continue
+                        
+                        text = raw_text.upper()
+                        start_time = time_to_ass(w['start'])
+                        end_time = time_to_ass(w['end'])
+                        
+                        # Use Highlight style for longer words (Hormozi effect)
+                        style = "Highlight" if len(text) > 3 else "Normal"
+                        
+                        ass_content += f"Dialogue: 0,{start_time},{end_time},{style},,0,0,0,,{text}\n"
+                    except:
+                        continue
+                
+                with open(ass_path, 'w', encoding='utf-8') as f:
+                    f.write(ass_content)
+                
+                # Use FFmpeg directly to burn subtitles with high quality
+                self.log("INFO", "Burning subtitles with FFmpeg...")
+                
+                import subprocess
+                
+                ffmpeg_cmd = [
+                    'ffmpeg', '-y',
+                    '-i', temp_video_noSub,
+                    '-vf', f"ass='{ass_path.replace(chr(92), '/')}'",
+                    '-c:v', 'libx264',
+                    '-preset', 'slow',  # Better quality
+                    '-b:v', '8M',  # High bitrate for sharp video
+                    '-maxrate', '10M',
+                    '-bufsize', '16M',
+                    '-profile:v', 'high',
+                    '-level', '4.2',
+                    '-pix_fmt', 'yuv420p',
+                    '-c:a', 'aac',
+                    '-b:a', '256k',
+                    '-movflags', '+faststart',
+                    output_filename
+                ]
+                
+                result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+                
+                if result.returncode != 0:
+                    self.log("WARNING", f"FFmpeg subtitle failed, using video without subs")
+                    shutil.copy(temp_video_noSub, output_filename)
+                
+                # Cleanup
+                if os.path.exists(ass_path):
+                    os.remove(ass_path)
+            else:
+                # No subtitles, just copy
+                shutil.copy(temp_video_noSub, output_filename)
+            
+            # Cleanup temp files
+            if os.path.exists(temp_sub):
+                os.remove(temp_sub)
+            if os.path.exists(temp_video_noSub):
+                os.remove(temp_video_noSub)
+
+            self.log("SUCCESS", f"Saved: {output_filename}")
+            
+            # Call video callback to show in UI immediately
+            if video_callback:
+                video_callback(output_filename)
+
+        except Exception as e:
+            self.log("ERROR", f"Failed to process {clip_name}: {str(e)}")
